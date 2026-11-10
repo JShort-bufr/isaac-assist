@@ -1,4 +1,7 @@
 #!/bin/bash
+# Modified work, 2026 — isaac-assist-frame phase 1 (Isaac Sim 6.2).
+# Derived from k3street/Omniverse_Nemotron_Ext (Apache-2.0).
+# Changes: accept --version 6.2 and load exts/isaac_6.2.
 # Isaac Sim Launch Script for Isaac Assist Extension
 #
 # This script launches Isaac Sim with the properly configured ROS2 environment
@@ -9,13 +12,14 @@
 #   ./launch_isaac.sh /path/to/file.usd       # Launch with a USD file
 #   ./launch_isaac.sh --version 5.1           # Force Isaac Sim 5.1
 #   ./launch_isaac.sh --version 6.0           # Force Isaac Sim 6.0/source build
+#   ./launch_isaac.sh --version 6.2           # Force Isaac Sim 6.2 (~/isaacsim on Legion)
 #   ./launch_isaac.sh --lab                   # Launch Isaac Lab shell
 #   ./launch_isaac.sh --lab script.py [args]  # Run script through Isaac Lab
 #
 # Environment overrides:
 #   ISAAC_SIM_PATH, ISAACSIM_PATH, or ISAAC_SIM_ROOT — explicit Isaac Sim dir
 #   ISAAC_LAB_ROOT or ISAACLAB_PATH  — explicit Isaac Lab repo dir
-#   ISAAC_VERSION                    — "5.1" or "6.0"
+#   ISAAC_VERSION                    — "5.1", "6.0", or "6.2"
 #   ISAAC_ASSIST_EXT_FOLDER          — explicit extension search folder
 
 set -euo pipefail
@@ -41,7 +45,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --version)
             if [[ $# -lt 2 ]]; then
-                echo "❌ --version requires 5.1 or 6.0"
+                echo "❌ --version requires 5.1, 6.0, or 6.2"
                 exit 1
             fi
             REQUESTED_VERSION="$2"
@@ -74,6 +78,8 @@ declare -a SIM_CANDIDATES_X86_64=(
     "6.0:$HOME/Documents/Github/isaacsim/_build/linux-x86_64/release"
     "6.0:$HOME/isaac-sim/isaac-sim-standalone-6.0.0-linux-x86_64"
     "6.0:$HOME/.local/share/ov/pkg/isaac-sim-6.0.0"
+    "6.2:$HOME/isaacsim"
+    "6.2:$HOME/.local/share/ov/pkg/isaac-sim-6.2.0"
     "5.1:$HOME/isaac-sim/isaac-sim-standalone-5.1.0-linux-x86_64"
     "5.1:$HOME/.local/share/ov/pkg/isaac-sim-5.1.0"
 )
@@ -157,17 +163,19 @@ if [[ -z "$ISAAC_SIM_PATH" || ! -f "$ISAAC_SIM_PATH/isaac-sim.sh" ]]; then
     if [[ -n "$REQUESTED_VERSION" ]]; then
         echo "   Requested version: $REQUESTED_VERSION"
     fi
-    echo "   Set ISAAC_SIM_PATH, ISAACSIM_PATH, or ISAAC_SIM_ROOT, or install to one of the known 5.1/6.0 paths."
+    echo "   Set ISAAC_SIM_PATH, ISAACSIM_PATH, or ISAAC_SIM_ROOT, or install to one of the known 5.1/6.0/6.2 paths."
     exit 1
 fi
 
 VERSION_LABEL="unknown"
 [[ "$ISAAC_SIM_PATH" == *"5.1"* ]] && VERSION_LABEL="5.1"
 [[ "$ISAAC_SIM_PATH" == *"6.0"* || "$ISAAC_SIM_PATH" == *"/IsaacSim/"* ]] && VERSION_LABEL="6.0"
+[[ "$ISAAC_SIM_PATH" == *"6.2"* ]] && VERSION_LABEL="6.2"
 if [[ -f "$ISAAC_SIM_PATH/VERSION" ]]; then
     VERSION_TEXT="$(tr -d '[:space:]' < "$ISAAC_SIM_PATH/VERSION")"
     [[ "$VERSION_TEXT" == 5.1* ]] && VERSION_LABEL="5.1"
     [[ "$VERSION_TEXT" == 6.0* ]] && VERSION_LABEL="6.0"
+    [[ "$VERSION_TEXT" == 6.2* ]] && VERSION_LABEL="6.2"
 fi
 if [[ -n "$REQUESTED_VERSION" ]]; then
     VERSION_LABEL="$REQUESTED_VERSION"
@@ -228,6 +236,8 @@ echo ""
 # ── Determine extension folder ────────────────────────────────────────────────
 if [[ -n "${ISAAC_ASSIST_EXT_FOLDER:-}" ]]; then
     EXT_FOLDER="$ISAAC_ASSIST_EXT_FOLDER"
+elif [[ "$VERSION_LABEL" == "6.2" ]]; then
+    EXT_FOLDER="$SCRIPT_DIR/exts/isaac_6.2"
 elif [[ "$VERSION_LABEL" == "6.0" ]]; then
     EXT_FOLDER="$SCRIPT_DIR/exts/isaac_6.0"
 else

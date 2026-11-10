@@ -1,0 +1,715 @@
+"""
+kit_rpc.py
+-----------
+A lightweight aiohttp HTTP server that runs INSIDE the Kit (Isaac Sim) process
+on port 8001. The FastAPI service (port 8000) calls this server inward to pull
+scene context, request viewport captures, and push patch code for approval.
+
+Lifecycle:
+  - Start from extension.on_startup()  → KitRPCServer().start()
+  - Stop from extension.on_shutdown()  → KitRPCServer().stop()
+"""
+from __future__ import annotations
+import asyncio
+import contextlib
+import io
+import json
+import queue as stdlib_queue
+import threading
+import carb
+from typing import Optional
+
+_PATCH_QUEUE: asyncio.Queue = asyncio.Queue()  # pending code patches awaiting approval
+_server_instance: Optional["KitRPCServer"] = None
+
+# ── Synchronous execution queue (main-thread dispatch) ────────────────────────
+# Items are (code: str, result_holder: dict) where result_holder has:
+#   "result": None | {"success": bool, "output": str}
+#   "event":  threading.Event
+_SYNC_EXEC_QUEUE: stdlib_queue.Queue = stdlib_queue.Queue()
+_exec_sub = None  # Kit update subscription handle
+
+
+def _kit_exec_tick(event):
+    """
+    Called every frame on Kit's main thread via the update event stream.
+    Drains the sync execution queue and runs code in Kit's Python context.
+    """
+    while True:
+        try:
+            code, result_holder = _SYNC_EXEC_QUEUE.get_nowait()
+        except stdlib_queue.Empty:
+            break
+
+        output_buf = io.StringIO()
+        success = False
+        try:
+            with contextlib.redirect_stdout(output_buf), contextlib.redirect_stderr(output_buf):
+                exec_globals = {"__builtins__": __builtins__}
+                exec(code, exec_globals)
+            success = True
+        except Exception as e:
+            output_buf.write(f"\nError: {e}")
+
+        result_holder["result"] = {
+            "success": success,
+            "output": output_buf.getvalue(),
+        }
+        result_holder["event"].set()
+
+
+def start_exec_tick():
+    """Register the main-thread execution tick. Call from extension on_startup."""
+    global _exec_sub
+    try:
+        import omni.kit.app
+        _exec_sub = (
+            omni.kit.app.get_app()
+            .get_update_event_stream()
+            .create_subscription_to_pop(_kit_exec_tick, name="IsaacAssist-ExecSync")
+        )
+        carb.log_warn("[IsaacAssist] Registered main-thread exec_sync tick")
+    except Exception as e:
+        carb.log_warn(f"[IsaacAssist] Failed to register exec_sync tick: {e}")
+
+
+def stop_exec_tick():
+    """Unregister the main-thread execution tick."""
+    global _exec_sub
+    _exec_sub = None
+
+
+def get_server() -> Optional["KitRPCServer"]:
+    return _server_instance
+
+
+def pop_pending_patch() -> Optional[str]:
+    """Extension UI calls this to check if there's a patch waiting for approval."""
+    try:
+        return _PATCH_QUEUE.get_nowait()
+    except Exception:
+        return None
+
+
+class KitRPCServer:
+    """
+    Runs aiohttp in a background thread so it doesn't block Kit's main loop.
+    """
+
+    def __init__(self, host: str = "127.0.0.1", port: int = 8001):
+        self.host = host
+        self.port = port
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[threading.Thread] = None
+        self._runner = None
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    def start(self) -> None:
+        global _server_instance
+        try:
+            import aiohttp
+        except ImportError:
+            carb.log_warn("[IsaacAssist] aiohttp not found — Kit RPC disabled. "
+                          "Install with: pip install aiohttp")
+            return
+
+        self._loop = asyncio.new_event_loop()
+        self._serve_task = None
+        self._thread = threading.Thread(target=self._run, daemon=True, name="IsaacAssist-RPC")
+        self._thread.start()
+        _server_instance = self
+        carb.log_warn(f"[IsaacAssist] Kit RPC server starting on {self.host}:{self.port}")
+
+    def stop(self) -> None:
+        if self._loop and self._loop.is_running():
+            # Cancel the serve task so _runner.cleanup() runs inside the loop
+            def _cancel():
+                if self._serve_task and not self._serve_task.done():
+                    self._serve_task.cancel()
+            self._loop.call_soon_threadsafe(_cancel)
+        if self._thread:
+            self._thread.join(timeout=5)
+        # Remove the port file
+        try:
+            import os
+            os.unlink("/tmp/isaac_assist_rpc_port")
+        except Exception:
+            pass
+        carb.log_warn("[IsaacAssist] Kit RPC server stopped")
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self._serve())
+        except RuntimeError:
+            pass  # loop stopped before future completed — expected on shutdown
+        finally:
+            self._loop.close()
+
+    async def _serve(self) -> None:
+        from aiohttp import web
+
+        app = web.Application()
+        app.router.add_get("/health", self._handle_health)
+        app.router.add_get("/context", self._handle_context)
+        app.router.add_get("/capture", self._handle_capture)
+        app.router.add_post("/exec_patch", self._handle_exec_patch)
+        app.router.add_post("/exec_sync", self._handle_exec_sync)
+        app.router.add_get("/selection", self._handle_selection)
+        app.router.add_post("/sim_control", self._handle_sim_control)
+        app.router.add_post("/set_viewport_camera", self._handle_set_viewport_camera)
+        app.router.add_get("/physics_watchdog", self._handle_physics_watchdog_get)
+        app.router.add_post("/physics_watchdog", self._handle_physics_watchdog_post)
+        app.router.add_get("/list_prims", self._handle_list_prims)
+        app.router.add_post("/check_placement", self._handle_check_placement)
+        app.router.add_post("/get_pose", self._handle_get_pose)
+        app.router.add_post("/bounds", self._handle_bounds)
+        app.router.add_post("/draw_axes", self._handle_draw_axes)
+        app.router.add_post("/grasp_gap", self._handle_grasp_gap)
+        app.router.add_post("/contacts", self._handle_contacts)
+        app.router.add_post("/set_camera_pose", self._handle_set_camera_pose)
+
+        self._runner = web.AppRunner(app)
+        await self._runner.setup()
+
+        # Try the configured port first, then fall back to the next 9 ports
+        bound_port = None
+        for candidate in range(self.port, self.port + 10):
+            try:
+                site = web.TCPSite(self._runner, self.host, candidate,
+                                   reuse_address=True)
+                await site.start()
+                bound_port = candidate
+                break
+            except OSError:
+                carb.log_warn(f"[IsaacAssist] Port {candidate} in use, trying next...")
+
+        if bound_port is None:
+            carb.log_error("[IsaacAssist] Could not bind Kit RPC server on any port in range "
+                           f"{self.port}-{self.port + 9}. Kit RPC disabled.")
+            return
+
+        self.port = bound_port
+        # Write bound port to a well-known file so the FastAPI service can discover it
+        try:
+            with open("/tmp/isaac_assist_rpc_port", "w") as _pf:
+                _pf.write(str(bound_port))
+        except Exception:
+            pass
+        carb.log_warn(f"[IsaacAssist] Kit RPC listening on http://{self.host}:{self.port}")
+
+        # Keep the server alive until cancelled
+        self._serve_task = asyncio.current_task()
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await self._runner.cleanup()
+
+    # ── Route handlers ────────────────────────────────────────────────────────
+
+    async def _handle_health(self, request) -> "web.Response":
+        from aiohttp import web
+        return web.json_response({"ok": True, "service": "isaac-assist-kit-rpc"})
+
+    async def _handle_context(self, request) -> "web.Response":
+        """
+        Returns a combined context snapshot:
+        stage summary, selected prim properties, and recent warning/error logs.
+        """
+        from aiohttp import web
+
+        # Run Kit API calls on the main asyncio loop (this IS the background loop).
+        # Since we are not on Kit's main thread, use simple synchronous calls
+        # which are safe for read-only USD access.
+        try:
+            from .stage_reader import get_stage_summary, get_stage_tree
+            from .prim_properties import get_selected_prim_properties
+            from .console_log import get_recent_logs
+
+            full = request.rel_url.query.get("full", "false").lower() == "true"
+            stage_data = get_stage_tree() if full else get_stage_summary()
+
+            payload = {
+                "stage": stage_data,
+                "selected_prim": get_selected_prim_properties(),
+                "recent_logs": get_recent_logs(n=30, min_level="warning"),
+            }
+            return web.json_response(payload)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_capture(self, request) -> "web.Response":
+        """Triggers a viewport screenshot and returns base64 PNG."""
+        from aiohttp import web
+        try:
+            from .viewport_capture import capture_viewport_png
+            max_dim = int(request.rel_url.query.get("max_dim", "1280"))
+            result = await capture_viewport_png(max_dim=max_dim)
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_exec_patch(self, request) -> "web.Response":
+        """
+        Queues a Python code patch for approval in the extension UI.
+        Body: {"code": "...", "description": "..."}
+        """
+        from aiohttp import web
+        try:
+            body = await request.json()
+            code = body.get("code", "").strip()
+            if not code:
+                return web.json_response({"error": "No code provided"}, status=400)
+            await _PATCH_QUEUE.put(body)
+            carb.log_warn(f"[IsaacAssist] Patch queued for approval: {code[:80]}...")
+            return web.json_response({"queued": True})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_exec_sync(self, request) -> "web.Response":
+        """
+        Execute Python code synchronously on Kit's main thread and return
+        stdout/stderr + success flag.  Used by the pipeline executor.
+        Body: {"code": "...", "timeout": 30}
+        """
+        from aiohttp import web
+        try:
+            body = await request.json()
+            code = body.get("code", "").strip()
+            timeout = body.get("timeout", 30)
+            if not code:
+                return web.json_response({"error": "No code provided"}, status=400)
+
+            result_holder = {"result": None, "event": threading.Event()}
+            _SYNC_EXEC_QUEUE.put((code, result_holder))
+
+            # Wait on a thread so we don't block the aiohttp event loop
+            loop = asyncio.get_event_loop()
+            completed = await loop.run_in_executor(
+                None, lambda: result_holder["event"].wait(timeout=timeout)
+            )
+
+            if not completed or result_holder["result"] is None:
+                return web.json_response(
+                    {"success": False, "output": "Execution timed out", "error": "timeout"},
+                    status=504,
+                )
+
+            return web.json_response(result_holder["result"])
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_get_pose(self, request) -> "web.Response":
+        """Convention-labeled pose of a prim, optionally in another prim's
+        frame.  Body: {"prim_path": "...", "in_frame": "world"|prim path,
+        "prefer": "fabric"|"usd"}.  Prefers the live Fabric transform
+        (what physics wrote this frame) with USD-stage fallback; the
+        response's "source" states which answered."""
+        from aiohttp import web
+        try:
+            body = await request.json()
+            from .spatial_tools import get_prim_pose
+            pose = get_prim_pose(
+                body.get("prim_path", ""),
+                body.get("in_frame", "world"),
+                body.get("prefer", "fabric"))
+            return web.json_response(pose)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_bounds(self, request) -> "web.Response":
+        """Geometric size of a prim paired with its live pose.  Body:
+        {"prim_path": "...", "in_frame": "world"|prim path,
+         "prefer": "fabric"|"usd", "include_proxy": false}.
+
+        Extents come from USD geometry with every ancestor transform
+        ignored, because a USD *world* bound under Isaac Lab is the
+        authoring-time box wherever the object started; the centre comes
+        from the same Fabric-preferred pose /get_pose returns.  Callers
+        that could previously only be handed extents by hand can now read
+        them, which is what /list_prims never exposed."""
+        from aiohttp import web
+        try:
+            body = await request.json()
+            from .spatial_tools import prim_bounds
+            return web.json_response(prim_bounds(
+                body.get("prim_path", ""),
+                body.get("in_frame", "world"),
+                body.get("prefer", "fabric"),
+                bool(body.get("include_proxy", False))))
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_grasp_gap(self, request) -> "web.Response":
+        """Live pre-grasp geometry: object pose in the hand frame, digit
+        tip vectors/distances to the object, aperture-center offset, and
+        optional per-axis box-surface clearances.  Body: {"object": path,
+        "hand_frame": path, "digit_tips": [paths...],
+        "object_half_extents": [x,y,z] (optional),
+        "prefer": "fabric"|"usd"}.  Read-only — safe off the main
+        thread."""
+        from aiohttp import web
+        try:
+            body = await request.json()
+            from .spatial_tools import grasp_gap
+            report = grasp_gap(
+                body.get("object", ""),
+                body.get("hand_frame", ""),
+                list(body.get("digit_tips", [])),
+                body.get("object_half_extents"),
+                body.get("prefer", "fabric"))
+            return web.json_response(report)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_contacts(self, request) -> "web.Response":
+        """Live PhysX contact report, aggregated per body pair.  Body:
+        {"filter": "substring" (optional), "timeout": s}.  Only pairs
+        whose bodies carry the PhysX contact-report API appear (Isaac Lab
+        contact sensors apply it to their tracked bodies).  Runs on the
+        main-thread sync-exec tick."""
+        from aiohttp import web
+        try:
+            body = await request.json()
+            needle = str(body.get("filter", ""))
+            code = (
+                "import json\n"
+                "from omni.physx import get_physx_simulation_interface\n"
+                "from pxr import PhysicsSchemaTools\n"
+                f"needle = {json.dumps(needle)}\n"
+                "headers, data = (get_physx_simulation_interface()\n"
+                "                 .get_contact_report())\n"
+                "pairs = {}\n"
+                "for header in headers:\n"
+                "    actor0 = str(PhysicsSchemaTools.intToSdfPath("
+                "header.actor0))\n"
+                "    actor1 = str(PhysicsSchemaTools.intToSdfPath("
+                "header.actor1))\n"
+                "    if needle and needle not in actor0 and needle not in "
+                "actor1:\n"
+                "        continue\n"
+                "    key = (actor0, actor1)\n"
+                "    entry = pairs.setdefault(key, {\n"
+                "        'actor0': actor0, 'actor1': actor1,\n"
+                "        'contact_points': 0, 'total_impulse': 0.0,\n"
+                "        'min_separation': None})\n"
+                "    start = header.contact_data_offset\n"
+                "    count = header.num_contact_data\n"
+                "    for index in range(start, start + count):\n"
+                "        contact = data[index]\n"
+                "        entry['contact_points'] += 1\n"
+                "        impulse = (contact.impulse.x ** 2 +\n"
+                "                   contact.impulse.y ** 2 +\n"
+                "                   contact.impulse.z ** 2) ** 0.5\n"
+                "        entry['total_impulse'] += impulse\n"
+                "        separation = float(contact.separation)\n"
+                "        if (entry['min_separation'] is None or\n"
+                "                separation < entry['min_separation']):\n"
+                "            entry['min_separation'] = separation\n"
+                "print(json.dumps({'pairs': list(pairs.values()),\n"
+                "                  'pair_count': len(pairs)}))\n"
+            )
+            result_holder = {"result": None, "event": threading.Event()}
+            _SYNC_EXEC_QUEUE.put((code, result_holder))
+            loop = asyncio.get_event_loop()
+            completed = await loop.run_in_executor(
+                None,
+                lambda: result_holder["event"].wait(
+                    timeout=float(body.get("timeout", 10))))
+            if not completed or result_holder["result"] is None:
+                return web.json_response(
+                    {"error": "contact query timed out"}, status=504)
+            output = result_holder["result"].get("output", "").strip()
+            try:
+                return web.json_response(json.loads(output.splitlines()[-1]))
+            except (json.JSONDecodeError, ValueError, IndexError):
+                return web.json_response(
+                    {"error": "unparseable contact report",
+                     "raw_output": output[-1200:]}, status=500)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_set_camera_pose(self, request) -> "web.Response":
+        """Deterministically place the viewport camera.  Body:
+        {"eye": [x,y,z], "target": [x,y,z]}.  Makes captures
+        reproducible across sessions (the default viewport state is
+        not).  Runs on the main-thread sync-exec tick."""
+        from aiohttp import web
+        try:
+            body = await request.json()
+            eye = [float(v) for v in body["eye"]]
+            target = [float(v) for v in body["target"]]
+            code = (
+                "from pxr import Gf\n"
+                "from omni.kit.viewport.utility import get_active_viewport\n"
+                "from omni.kit.viewport.utility.camera_state import "
+                "ViewportCameraState\n"
+                "viewport = get_active_viewport()\n"
+                "state = ViewportCameraState(viewport.camera_path, viewport)\n"
+                f"state.set_position_world(Gf.Vec3d({eye[0]!r}, {eye[1]!r}, "
+                f"{eye[2]!r}), True)\n"
+                f"state.set_target_world(Gf.Vec3d({target[0]!r}, "
+                f"{target[1]!r}, {target[2]!r}), True)\n"
+                "print('camera set')\n"
+            )
+            loop = asyncio.get_event_loop()
+            # Scene load can starve the exec tick for tens of seconds
+            # (observed live 2026-08-05) — wait long, retry once.
+            result = None
+            for _attempt in range(2):
+                result_holder = {"result": None, "event": threading.Event()}
+                _SYNC_EXEC_QUEUE.put((code, result_holder))
+                completed = await loop.run_in_executor(
+                    None, lambda: result_holder["event"].wait(timeout=45))
+                if completed and result_holder["result"] is not None:
+                    result = result_holder["result"]
+                    break
+            if result is None:
+                return web.json_response(
+                    {"error": "camera set timed out"}, status=504)
+            if not result.get("success"):
+                return web.json_response(
+                    {"error": result.get("output", "")[-800:]}, status=500)
+            return web.json_response({"ok": True, "eye": eye,
+                                      "target": target})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_draw_axes(self, request) -> "web.Response":
+        """Draw an RGB axes triad at a pose (debug-only mutation, runs on
+        the main-thread sync-exec tick).  Body: {"position": [x,y,z],
+        "quaternion": [...], "convention": "wxyz"|"xyzw", "scale": m}."""
+        from aiohttp import web
+        try:
+            body = await request.json()
+            quat = [float(v) for v in body.get("quaternion", [1, 0, 0, 0])]
+            if body.get("convention", "wxyz") == "xyzw":
+                quat = [quat[3], quat[0], quat[1], quat[2]]
+            norm = sum(v * v for v in quat) ** 0.5
+            quat = [v / norm for v in quat]
+            from .spatial_tools import build_draw_axes_code
+            code = build_draw_axes_code(
+                [float(v) for v in body["position"]], quat,
+                float(body.get("scale", 0.1)))
+            result_holder = {"result": None, "event": threading.Event()}
+            _SYNC_EXEC_QUEUE.put((code, result_holder))
+            loop = asyncio.get_event_loop()
+            completed = await loop.run_in_executor(
+                None, lambda: result_holder["event"].wait(timeout=10))
+            if not completed or result_holder["result"] is None:
+                return web.json_response(
+                    {"error": "draw timed out"}, status=504)
+            return web.json_response({"drawn": True,
+                                      "label": body.get("label", "")})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_selection(self, request) -> "web.Response":
+        """Return the currently selected prim path(s) and properties."""
+        from aiohttp import web
+        try:
+            from .prim_properties import get_selected_prim_properties
+            sel = get_selected_prim_properties()
+            return web.json_response(sel)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_sim_control(self, request) -> "web.Response":
+        """
+        Control the simulation timeline.
+        Body: {"action": "play"|"pause"|"stop"|"step"|"reset", "step_count": N}
+        """
+        from aiohttp import web
+        try:
+            body = await request.json()
+            action = body.get("action", "").lower()
+            code_map = {
+                "play": "import omni.timeline; omni.timeline.get_timeline_interface().play()",
+                "pause": "import omni.timeline; omni.timeline.get_timeline_interface().pause()",
+                "stop": "import omni.timeline; omni.timeline.get_timeline_interface().stop()",
+                "reset": (
+                    "import omni.timeline\n"
+                    "tl = omni.timeline.get_timeline_interface()\n"
+                    "tl.stop(); tl.set_current_time(0)"
+                ),
+            }
+            if action == "step":
+                n = body.get("step_count", 1)
+                code = f"import omni.timeline\ntl = omni.timeline.get_timeline_interface()\nfor _ in range({n}): tl.forward_one_frame()"
+            elif action in code_map:
+                code = code_map[action]
+            else:
+                return web.json_response({"error": f"Unknown action: {action}"}, status=400)
+
+            await _PATCH_QUEUE.put({"code": code, "description": f"sim_control: {action}", "auto_approve": True})
+            return web.json_response({"ok": True, "action": action})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_set_viewport_camera(self, request) -> "web.Response":
+        """
+        Switch the active viewport camera.
+        Body: {"camera_path": "/World/Camera"}
+        """
+        from aiohttp import web
+        try:
+            body = await request.json()
+            camera_path = body.get("camera_path", "")
+            if not camera_path:
+                return web.json_response({"error": "No camera_path provided"}, status=400)
+            code = (
+                "import omni.kit.viewport.utility\n"
+                f"omni.kit.viewport.utility.get_active_viewport().camera_path = '{camera_path}'"
+            )
+            await _PATCH_QUEUE.put({"code": code, "description": f"Set viewport camera to {camera_path}", "auto_approve": True})
+            return web.json_response({"ok": True, "camera_path": camera_path})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_physics_watchdog_get(self, request) -> "web.Response":
+        """Return the fail-fast rigid-body transform watchdog state."""
+        from aiohttp import web
+        try:
+            from .physics_watchdog import get_physics_watchdog
+            return web.json_response(get_physics_watchdog().state())
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_physics_watchdog_post(self, request) -> "web.Response":
+        """
+        Configure or control the transform watchdog.
+        Body: {"action": "configure"|"enable"|"disable"|"reset", ...}
+        """
+        from aiohttp import web
+        try:
+            from .physics_watchdog import get_physics_watchdog
+
+            body = await request.json()
+            action = body.get("action", "configure").lower()
+            watchdog = get_physics_watchdog()
+            if action == "configure":
+                state = watchdog.configure(
+                    root_path=body.get("root_path", ""),
+                    max_translation=float(body.get("max_translation", 100.0)),
+                    max_frame_displacement=float(
+                        body.get("max_frame_displacement", 0.1)
+                    ),
+                    enabled=bool(body.get("enabled", True)),
+                )
+            elif action == "enable":
+                state = watchdog.enable()
+            elif action == "disable":
+                state = watchdog.disable()
+            elif action == "reset":
+                state = watchdog.reset()
+            else:
+                return web.json_response(
+                    {"error": f"Unknown watchdog action: {action}"}, status=400
+                )
+            return web.json_response(state)
+        except (TypeError, ValueError, RuntimeError) as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_list_prims(self, request) -> "web.Response":
+        """
+        List prims by direct stage traversal — unlimited depth (the old
+        tree walk capped at depth 6 and hid deep robot links).
+        Query params: ?filter_type=Mesh&under_path=/World
+                      &contains=index_L2&limit=200
+        """
+        from aiohttp import web
+        try:
+            import omni.usd
+            stage = omni.usd.get_context().get_stage()
+            if stage is None:
+                return web.json_response({"error": "no stage open"},
+                                         status=500)
+            filter_type = request.rel_url.query.get("filter_type")
+            under_path = request.rel_url.query.get("under_path", "/")
+            contains = request.rel_url.query.get("contains", "")
+            limit = int(request.rel_url.query.get("limit", "500"))
+
+            prims = []
+            truncated = False
+            for prim in stage.Traverse():
+                path = str(prim.GetPath())
+                if not path.startswith(under_path):
+                    continue
+                if contains and contains not in path:
+                    continue
+                prim_type = prim.GetTypeName()
+                if filter_type and prim_type != filter_type:
+                    continue
+                prims.append({"path": path, "type": str(prim_type)})
+                if len(prims) >= limit:
+                    truncated = True
+                    break
+            payload = {"prims": prims, "count": len(prims)}
+            if truncated:
+                payload["truncated_to"] = limit
+            return web.json_response(payload)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_check_placement(self, request) -> "web.Response":
+        """
+        Test if a box at a given position collides with anything in the scene.
+        Uses PhysX overlap_box — no prim creation needed, runs in microseconds.
+        Requires PhysicsScene and existing objects with CollisionAPI.
+        """
+        from aiohttp import web
+        try:
+            data = await request.json()
+            half_extents = data["half_extents"]  # [x, y, z]
+            position = data["position"]          # [x, y, z]
+            rotation = data.get("rotation", [0, 0, 0, 1])  # quaternion xyzw
+
+            code = (
+                "import json\n"
+                "from omni.physx import get_physx_scene_query_interface\n"
+                "import carb\n"
+                "\n"
+                "_collisions = []\n"
+                "def _report_hit(hit):\n"
+                "    _collisions.append(str(hit.rigid_body))\n"
+                "    return True\n"
+                "\n"
+                "sq = get_physx_scene_query_interface()\n"
+                f"sq.overlap_box(\n"
+                f"    carb.Float3({half_extents[0]}, {half_extents[1]}, {half_extents[2]}),\n"
+                f"    carb.Float3({position[0]}, {position[1]}, {position[2]}),\n"
+                f"    carb.Float4({rotation[0]}, {rotation[1]}, {rotation[2]}, {rotation[3]}),\n"
+                f"    _report_hit\n"
+                f")\n"
+                "print(json.dumps({'collisions': _collisions, 'clear': len(_collisions) == 0}))"
+            )
+
+            result_holder = {"result": None, "event": threading.Event()}
+            _SYNC_EXEC_QUEUE.put((code, result_holder))
+
+            loop = asyncio.get_event_loop()
+            completed = await loop.run_in_executor(
+                None, lambda: result_holder["event"].wait(timeout=5)
+            )
+
+            if not completed or result_holder["result"] is None:
+                return web.json_response(
+                    {"collisions": [], "clear": True, "warning": "PhysX query timed out"},
+                )
+
+            # Parse the JSON output from the executed code
+            output = result_holder["result"].get("output", "").strip()
+            try:
+                parsed = json.loads(output)
+                return web.json_response(parsed)
+            except (json.JSONDecodeError, ValueError):
+                return web.json_response({"collisions": [], "clear": True, "raw_output": output})
+
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)

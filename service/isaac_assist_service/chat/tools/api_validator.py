@@ -1,3 +1,7 @@
+# Modified work, 2026 — isaac-assist-frame phase 1 (Isaac Sim 6.2).
+# Derived from k3street/Omniverse_Nemotron_Ext (Apache-2.0).
+# Changes: Isaac Sim 6.2 uses the 6.0 API allowlist and ROS2 node lane.
+
 """
 api_validator.py
 -----------------
@@ -140,8 +144,15 @@ def _module_allowed(module: str, allowlist: set) -> bool:
     return False
 
 
+def _lane_key(profile: RuntimeProfile) -> str:
+    """Isaac Sim 6.2 keeps the 6.0 API lane."""
+    if profile.key == "isaacsim-6.2":
+        return "isaacsim-6.0"
+    return profile.key
+
+
 def _blocked_for_profile(module: str, profile: RuntimeProfile) -> Optional[str]:
-    for blocked, replacement in _PROFILE_BLOCKED_MODULES.get(profile.key, {}).items():
+    for blocked, replacement in _PROFILE_BLOCKED_MODULES.get(_lane_key(profile), {}).items():
         if module == blocked or module.startswith(blocked + "."):
             return replacement
     return None
@@ -156,6 +167,14 @@ def _check_version_wrong_node_strings(code: str, profile: RuntimeProfile) -> Lis
             "module": "isaacsim.ros2.bridge",
             "message": "Isaac Sim 6.0 code contains 5.1 ROS2 OmniGraph node namespace strings",
             "fix_hint": "Use `isaacsim.ros2.nodes.*` node type strings for Isaac Sim 6.0.",
+        })
+    if profile.key == "isaacsim-6.2" and "isaacsim.ros2.bridge." in code:
+        issues.append({
+            "severity": "version_mismatch",
+            "line": 0,
+            "module": "isaacsim.ros2.bridge",
+            "message": "Isaac Sim 6.2 code contains 5.1 ROS2 OmniGraph node namespace strings",
+            "fix_hint": "Use `isaacsim.ros2.nodes.*` node type strings. Isaac Sim 6.2 inherits the 6.0 API lane.",
         })
     if profile.key == "isaacsim-5.1" and "isaacsim.ros2.nodes." in code:
         issues.append({
@@ -181,7 +200,7 @@ def validate_code(code: str, profile: Optional[RuntimeProfile | str] = None) -> 
     runtime_profile = profile if isinstance(profile, RuntimeProfile) else get_runtime_profile(profile)
     allowlist = (
         _CORE_ALLOWLIST
-        | _PROFILE_ALLOWLIST.get(runtime_profile.key, set())
+        | _PROFILE_ALLOWLIST.get(_lane_key(runtime_profile), set())
         | _load_extra_allowlist()
     )
     issues: List[dict] = []

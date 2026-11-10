@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "notice": "Modified work, 2026. Derived from k3street/Omniverse_Nemotron_Ext (Apache-2.0). Added the isaacsim-6.2 profile.",
   "default_unscoped_profile": "isaacsim-5.1",
   "profiles": {
     "isaacsim-5.1": {
@@ -50,6 +51,33 @@
           "unscoped legacy templates",
           "5.1 bridge recipes saved as 6.0 known-good without live validation",
           "isaacsim.ros2.bridge.* node type strings in generated 6.0 code"
+        ]
+      }
+    },
+    "isaacsim-6.2": {
+      "isaac_sim_versions": ["6.2", "6.2.0"],
+      "isaac_lab_versions": ["3.x"],
+      "extension_folder": "exts/isaac_6.2",
+      "launch_selector": "./launch_isaac.sh --version 6.2",
+      "knowledge_files": [
+        "workspace/knowledge/code_patterns_6.0.0.jsonl",
+        "workspace/knowledge/knowledge_6.0.0.jsonl",
+        "workspace/knowledge/negative_patterns_6.0.0.jsonl"
+      ],
+      "template_policy": "6.2 uses the 6.0 API lane. Templates tagged isaacsim-6.2, 6.2, 6.2.0, isaacsim-6.0, 6.0, 6.0.0, or any may be used.",
+      "qa_policy": "6.2 QA must be tagged. Live Isaac Sim 6.2 evidence is UNVERIFIED until the Legion smoke.",
+      "api_scope": {
+        "ros2_omnigraph_namespace": "isaacsim.ros2.nodes",
+        "allowed": [
+          "Isaac Sim 6.0 API lane with 6.2 tags",
+          "pxr and omni.usd APIs for conservative USD edits",
+          "isaacsim.ros2.nodes.* node type strings",
+          "Python 3.12 runtime"
+        ],
+        "blocked": [
+          "unscoped legacy templates",
+          "isaacsim.ros2.bridge.* node type strings in generated 6.2 code",
+          "unverified 6.2-only Kit APIs saved as known-good"
         ]
       }
     }

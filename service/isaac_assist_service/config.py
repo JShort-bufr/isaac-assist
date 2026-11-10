@@ -1,3 +1,7 @@
+# Modified work, 2026 — isaac-assist-frame phase 1 (Isaac Sim 6.2).
+# Derived from k3street/Omniverse_Nemotron_Ext (Apache-2.0).
+# Changes: record the phase-1 provider-chain settings. The key file is a path, not a key.
+
 import os
 
 
@@ -119,6 +123,15 @@ class Config:
         self.continuity_manager_url  = os.environ.get("CONTINUITY_MANAGER_URL", "http://localhost:7100")
         self.policy_bank_url         = os.environ.get("POLICY_BANK_URL",        "http://localhost:7101")
         self.manipulation_embodiment_id = os.environ.get("EMBODIMENT_ID", "tenthings_v1_open_arm_bimanual")
+
+        # Phase-1 provider chain. The NVIDIA key itself is never stored here.
+        self.provider_order = os.environ.get(
+            "ISAAC_ASSIST_PROVIDER_ORDER", "legion-ollama,nvidia,offline"
+        )
+        self.nvidia_model = os.environ.get("NVIDIA_MODEL", "")
+        self.nvidia_api_key_file = os.environ.get(
+            "NVIDIA_API_KEY_FILE", "~/.config/bufrai/nvidia-api.env"
+        )
 
 
 config = Config()

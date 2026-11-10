@@ -1,8 +1,12 @@
 # Runtime Version Scopes
 
-Isaac Assist supports two compatibility lanes. Keep artifacts in the lane where
+Modified work, 2026. Derived from k3street/Omniverse_Nemotron_Ext (Apache-2.0).
+Added the Isaac Sim 6.2 lane. It keeps the 6.0 API surface and adds 6.2 tags.
+
+Isaac Assist supports two compatibility lanes that were verified upstream, plus
+an Isaac Sim 6.2 lane that reuses the 6.0 APIs. Keep artifacts in the lane where
 they were actually verified; do not assume Isaac Sim 5.1 code works in Isaac Sim
-6.0 or Isaac Lab 3.x.
+6.0 or Isaac Lab 3.x, and do not assume a 6.0 recipe has been smoked on 6.2.
 
 The machine-readable policy lives in
 `workspace/knowledge/runtime_scopes.json`. The Python runtime source of truth is
@@ -68,3 +72,23 @@ Unscoped legacy artifacts default to `isaacsim-5.1`. This preserves the existing
 The only safe cross-version code is conservative USD-level code that uses
 `pxr`, `omni.usd`, and APIs verified in both runtimes. Even then, save the
 artifact as `runtime_profiles: ["any"]` only after testing in both lanes.
+
+## Isaac Sim 6.2 lane
+
+`isaacsim-6.2` is selectable with `ISAAC_RUNTIME_PROFILE=isaacsim-6.2` or
+`ISAAC_VERSION=6.2`. Aliases: `6.2`, `6.2.0`, `isaacsim_6.2`.
+
+| Scope | Isaac Sim 6.2 lane |
+|---|---|
+| Runtime profile | `isaacsim-6.2` |
+| Target version | 6.2.0 |
+| Python | 3.12 |
+| Isaac Lab | 3.x (same major lane as 6.0; exact Lab build UNVERIFIED) |
+| API lane | Isaac Sim 6.0 APIs, including `isaacsim.ros2.nodes.*` |
+| Extension folder | `exts/isaac_6.2` |
+| Launcher | `./launch_isaac.sh --version 6.2` |
+| Knowledge files | Reuses the 6.0 jsonl corpora. A split 6.2 corpus is not in this frame. |
+
+Known 6.0 to 6.2 difference: the target version and Python runtime are 6.2.0
+and 3.12. No other 6.2-only symbol rename was verified in this build. See
+`docs/bufrai-phase1.md` for the Legion smoke list.
