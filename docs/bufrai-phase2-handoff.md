@@ -9,8 +9,9 @@ Pick up on the Legion box. The cloud session cannot run Isaac Sim.
 | Branch | `bufrai/phase2-sticky-notes` |
 | Draft PR | https://github.com/JShort-bufr/isaac-assist/pull/2 |
 | Base | `bufrai/phase1-isaac-6.2` (stacked on draft PR #1) |
-| Head | `a3f054990b2ac72d19a2d76814938436bd9abb9d` |
+| Kit fix | `a3f054990b2ac72d19a2d76814938436bd9abb9d` (contained in the branch tip) |
 | Design doc | `docs/bufrai-phase2.md` |
+| Omniverse catalog | `~/work/isaac-knowledge/omniverse-org-catalog.md` on the Legion |
 
 Leave the pull request a draft. Do not merge it, do not mark it ready, and do not add GitHub workflows.
 
@@ -21,10 +22,11 @@ cd ~/isaac-assist
 git fetch origin bufrai/phase2-sticky-notes
 git checkout bufrai/phase2-sticky-notes
 git pull origin bufrai/phase2-sticky-notes
-git rev-parse HEAD   # a3f054990b2ac72d19a2d76814938436bd9abb9d
+git rev-parse HEAD
+git merge-base --is-ancestor a3f054990b2ac72d19a2d76814938436bd9abb9d HEAD
 ```
 
-Restart the assist service from this checkout, and launch Kit with this extension tree so both sides are `a3f0549`:
+Restart the assist service from this checkout, and launch Kit with this extension tree so both sides include `a3f0549`:
 
 ```bash
 python -m service.isaac_assist_service.main --host 127.0.0.1 --port 8000 --mode chain
@@ -79,6 +81,23 @@ That run was **51 passed** (32 phase 1, 19 phase 2). Adding `tests/test_routes.p
 Five motion-controller wire tests in the chat orchestrator fail the same way on `bufrai/phase1-isaac-6.2`. Leave them. Do not count them against this branch.
 
 Do not touch Isaac's bundled numpy or OpenBLAS. The NVIDIA key is only read from `~/.config/bufrai/nvidia-api.env` (mode `0600`). Do not put it in the repo, logs, or the pull request.
+
+## Omniverse catalog
+
+The NVIDIA-Omniverse catalog is complete. It covers 101 repositories: 72 active and 29 archived. Of those, 17 are useful now, 47 are useful later, and 37 are not relevant. The tiers and the top 10 come from a direct read of each repository README. The local scouts' notes are a separate labeled section only. Those notes repeat rows and include a few repo names that are not real. Do not use the scout section for rankings.
+
+The copy on the Legion is `~/work/isaac-knowledge/omniverse-org-catalog.md`.
+
+Use these for the assistant, in this order:
+
+| Repo | Why it matters here |
+|---|---|
+| `kit-usd-agents` | Chat USD, plus an MCP server for the Isaac docs |
+| `ovui`, and the archived `ui-scene` and `gestures` samples | Patterns for the Sticky Note panel, pinned markers, and drag-to-select |
+| `spawn-prims` | Stage edits go through Kit commands, which is what makes undo real |
+| `usd-content-agents` | NVIDIA's reference for an agent that edits USD and shows a diff to review |
+
+The rest of the top 10 are `kit-app-template`, `kit-sample-extensions`, `kit-automation-sample`, and `usd-search`.
 
 ## Files that matter for the re-smoke
 
