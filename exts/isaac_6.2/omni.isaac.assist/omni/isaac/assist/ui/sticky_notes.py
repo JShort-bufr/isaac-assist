@@ -21,10 +21,24 @@ except Exception:
 
 try:
     from .notes_client import NotesClient
+    from .markers import MarkerOverlay, marker_color
+    from .prim_notes import apply_custom_data, write_notes
+    from .region_pick import normalize_drag, pick_prims, write_crop_bytes
 except ImportError:  # pytest path-injects this directory as a top-level module
     from notes_client import NotesClient
+    from markers import MarkerOverlay, marker_color
+    from prim_notes import apply_custom_data, write_notes
+    from region_pick import normalize_drag, pick_prims, write_crop_bytes
 
-NOTE_STATUSES = ("draft", "sent", "proposed", "confirmed", "applied", "rejected")
+NOTE_STATUSES = (
+    "draft",
+    "sent",
+    "proposed",
+    "confirmed",
+    "applied",
+    "rejected",
+    "reverted",
+)
 
 
 def read_stage_selection() -> List[str]:
@@ -86,20 +100,33 @@ def sticky_panel_rows(controller: "StickyNoteController") -> List[Dict[str, Any]
         },
         {"kind": "button", "text": "Use selection"},
         {"kind": "button", "text": "Mark region"},
+        {
+            "kind": "toggle",
+            "text": "Markers: on" if controller.markers.enabled else "Markers: off",
+        },
         {"kind": "label", "text": "Comment"},
         {"kind": "field", "text": "comment", "value": controller.comment},
         {"kind": "button", "text": "Add note"},
         {"kind": "button", "text": "Send"},
+        {"kind": "button", "text": "Confirm all"},
     ]
     for note in controller.notes:
+        actions = ["Confirm", "Reject"]
+        if note.get("status") == "applied":
+            actions.append("Undo")
+        outcome = controller.results.get(note.get("id")) or {}
+        proposal = note.get("proposal") or {}
         rows.append(
             {
                 "kind": "note",
                 "id": note.get("id"),
                 "text": f"{note.get('prim_path', '')} [{note.get('status', '')}]",
                 "marker": pinned_marker_text(note),
+                "marker_color": marker_color(note.get("status")),
+                "summary": proposal.get("summary") or "",
+                "result": outcome.get("detail") or note.get("error") or "",
                 "status": note.get("status"),
-                "actions": ["Confirm", "Reject"],
+                "actions": actions,
             }
         )
     return rows
@@ -114,11 +141,13 @@ class StickyNoteController:
         stage_path: str = "",
         selection_reader: Optional[Callable[[], List[str]]] = None,
         prim_reader: Optional[Callable[[str], Dict[str, Any]]] = None,
+        stage_getter: Optional[Callable[[], Any]] = None,
     ):
         self.client = client
         self.stage_path = stage_path
         self.selection_reader = selection_reader or read_stage_selection
         self.prim_reader = prim_reader or read_prim_snapshot
+        self.stage_getter = stage_getter
         self.enabled = False
         self.comment = ""
         self.region = None
@@ -129,6 +158,35 @@ class StickyNoteController:
         self.key_attributes: Dict[str, Any] = {}
         self.world_transform = None
         self.crop_path = None
+        self.markers = MarkerOverlay()
+        self.results: Dict[str, Any] = {}
+        self.transform_overrides: Dict[str, Any] = {}
+        self.pending_crop: Optional[bytes] = None
+        self.read_only = False
+        self.session_layer = ""
+        self.session_layer_writable = False
+        self.custom_data_writer = write_notes
+
+    def _stage_flags(self) -> Dict[str, Any]:
+        flags: Dict[str, Any] = {}
+        if self.read_only:
+            flags["read_only"] = True
+        if self.session_layer:
+            flags["session_layer"] = self.session_layer
+        if self.session_layer_writable:
+            flags["session_layer_writable"] = True
+        return flags
+
+    def _mirror_custom_data(self, result: Optional[Dict[str, Any]]) -> bool:
+        if not result or not result.get("custom_data_allowed") or not result.get("custom_data"):
+            return False
+        if self.stage_getter is None:
+            return False
+        try:
+            stage = self.stage_getter()
+        except Exception:
+            return False
+        return apply_custom_data(stage, result["custom_data"])
 
     def set_enabled(self, enabled: bool) -> bool:
         self.enabled = bool(enabled)
@@ -138,17 +196,51 @@ class StickyNoteController:
         self.enabled = not self.enabled
         return self.enabled
 
-    def capture_selection(self) -> List[str]:
-        self.selected_paths = list(self.selection_reader() or [])
-        if not self.selected_paths:
-            return []
-        snapshot = self.prim_reader(self.selected_paths[0]) or {}
+    def _apply_snapshot(self, prim_path: str) -> None:
+        snapshot = self.prim_reader(prim_path) or {}
         self.prim_type = snapshot.get("prim_type") or self.prim_type
         if snapshot.get("key_attributes") is not None:
             self.key_attributes = dict(snapshot.get("key_attributes") or {})
         if "world_transform" in snapshot:
             self.world_transform = snapshot.get("world_transform")
+
+    def capture_selection(self) -> List[str]:
+        self.selected_paths = list(self.selection_reader() or [])
+        if not self.selected_paths:
+            return []
+        self._apply_snapshot(self.selected_paths[0])
         return list(self.selected_paths)
+
+    def capture_drag(
+        self,
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+        viewport_width: float,
+        viewport_height: float,
+        prim_bounds: Optional[List[Dict[str, Any]]] = None,
+        crop_bytes: Optional[bytes] = None,
+    ) -> Dict[str, Any]:
+        """Store a drag rect, the prims inside it, and optional cropped PNG bytes."""
+        self.region = normalize_drag(x0, y0, x1, y1, viewport_width, viewport_height)
+        fallback = list(self.selection_reader() or [])
+        picked = pick_prims(prim_bounds or [], self.region, fallback)
+        self.selected_paths = picked
+        if picked:
+            self._apply_snapshot(picked[0])
+        self.pending_crop = crop_bytes
+        return {"region": dict(self.region), "prim_paths": list(picked)}
+
+    def set_prim_transform(self, prim_path: str, world_transform: Dict[str, Any]) -> List[Dict[str, Any]]:
+        self.transform_overrides[prim_path] = world_transform
+        if self.selected_paths and self.selected_paths[0] == prim_path:
+            self.world_transform = world_transform
+        return self.markers.update(self.notes, self.transform_overrides)
+
+    def toggle_markers(self) -> bool:
+        self.markers.toggle()
+        return self.markers.enabled
 
     def mark_region(self) -> Dict[str, Any]:
         if self.pending_region is not None:
@@ -173,12 +265,19 @@ class StickyNoteController:
     def add_draft(self) -> Dict[str, Any]:
         if not self.enabled:
             raise RuntimeError("Sticky Note mode is off")
-        note = self.client.create(self.draft_payload())
+        payload = self.draft_payload()
+        payload.update(self._stage_flags())
+        note = self.client.create(payload)
+        if self.pending_crop and note.get("crop_path"):
+            write_crop_bytes(note["crop_path"], self.pending_crop)
+            self.pending_crop = None
         self.notes.append(note)
+        self.markers.update(self.notes, self.transform_overrides)
         return note
 
     def refresh(self) -> List[Dict[str, Any]]:
         self.notes = self.client.list_notes(self.stage_path)
+        self.markers.update(self.notes, self.transform_overrides)
         return list(self.notes)
 
     def send_batch(self, ids: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -191,7 +290,7 @@ class StickyNoteController:
                 for note in self.notes
                 if note.get("status") in ("draft", "sent")
             ]
-        result = self.client.send(self.stage_path, chosen)
+        result = self.client.send(self.stage_path, chosen, **self._stage_flags())
         returned = list(result.get("notes") or [])
         by_id = {note.get("id"): note for note in returned}
         if by_id:
@@ -208,13 +307,44 @@ class StickyNoteController:
         return result
 
     def confirm(self, note_id: str) -> Dict[str, Any]:
-        result = self.client.confirm(self.stage_path, note_id)
+        result = self.client.confirm(self.stage_path, note_id, **self._stage_flags())
         self._replace(result.get("note"))
+        self.results[note_id] = result
+        self._mirror_custom_data(result)
+        self.markers.update(self.notes, self.transform_overrides)
         return result
 
     def reject(self, note_id: str) -> Dict[str, Any]:
-        result = self.client.reject(self.stage_path, note_id)
+        result = self.client.reject(self.stage_path, note_id, **self._stage_flags())
         self._replace(result.get("note"))
+        self.results[note_id] = result
+        self._mirror_custom_data(result)
+        self.markers.update(self.notes, self.transform_overrides)
+        return result
+
+    def undo(self, note_id: str) -> Dict[str, Any]:
+        result = self.client.undo(self.stage_path, note_id, **self._stage_flags())
+        self._replace(result.get("note"))
+        self.results[note_id] = result
+        self.markers.update(self.notes, self.transform_overrides)
+        return result
+
+    def confirm_all(self) -> Dict[str, Any]:
+        """Confirm every proposed note. One click, then one result per note."""
+        if not self.enabled:
+            raise RuntimeError("Sticky Note mode is off")
+        ids = [note["id"] for note in self.notes if note.get("status") == "proposed"]
+        return self.review("confirm", ids)
+
+    def review(self, action: str, ids: List[str]) -> Dict[str, Any]:
+        result = self.client.review(self.stage_path, action, ids, **self._stage_flags())
+        for item in result.get("results") or []:
+            note_id = item.get("id")
+            if note_id:
+                self.results[note_id] = item
+            self._replace(item.get("note"))
+        self._mirror_custom_data(result)
+        self.markers.update(self.notes, self.transform_overrides)
         return result
 
     def _replace(self, note: Optional[Dict[str, Any]]) -> None:
@@ -242,6 +372,8 @@ class _CommentModel:
 
 def _wire(row: Dict[str, Any], controller: StickyNoteController):
     text = row.get("text")
+    if isinstance(text, str) and text.startswith("Markers"):
+        return controller.toggle_markers
     if row["kind"] == "toggle":
         return controller.toggle
     if text == "Use selection":
@@ -252,6 +384,8 @@ def _wire(row: Dict[str, Any], controller: StickyNoteController):
         return controller.add_draft
     if text == "Send":
         return controller.send_batch
+    if text == "Confirm all":
+        return controller.confirm_all
     return None
 
 
@@ -280,7 +414,7 @@ def mount_sticky_note_panel(
             elif kind == "field":
                 ui.StringField(model=comment_model)
             elif kind == "toggle":
-                ui.Button(row["text"], clicked_fn=controller.toggle)
+                ui.Button(row["text"], clicked_fn=_wire(row, controller))
             elif kind == "button":
                 clicked = _wire(row, controller)
                 ui.Button(row["text"], clicked_fn=clicked)
@@ -290,6 +424,10 @@ def mount_sticky_note_panel(
                     if row.get("marker"):
                         ui.Label(row["marker"])
                     note_id = row.get("id")
-                    ui.Button("Confirm", clicked_fn=lambda note_id=note_id: controller.confirm(note_id))
-                    ui.Button("Reject", clicked_fn=lambda note_id=note_id: controller.reject(note_id))
+                    if "Confirm" in row.get("actions", []):
+                        ui.Button("Confirm", clicked_fn=lambda note_id=note_id: controller.confirm(note_id))
+                    if "Reject" in row.get("actions", []):
+                        ui.Button("Reject", clicked_fn=lambda note_id=note_id: controller.reject(note_id))
+                    if "Undo" in row.get("actions", []):
+                        ui.Button("Undo", clicked_fn=lambda note_id=note_id: controller.undo(note_id))
     return controller

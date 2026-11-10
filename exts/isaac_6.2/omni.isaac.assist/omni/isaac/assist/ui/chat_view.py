@@ -32,6 +32,7 @@ except Exception:
 
 from ..service_client import AssistServiceClient
 from .sticky_notes import mount_sticky_note_panel
+from .viewport_overlay import attach_sticky_scene
 try:
     from ..webrtc_client import ViewportWebRTCClient
     HAS_LIVEKIT = True
@@ -910,6 +911,7 @@ class ChatViewWindow(ui.Window):
         try:
             base = getattr(self.service, "base_url", "http://127.0.0.1:8000")
             self._sticky_notes = mount_sticky_note_panel(ui, service_base=base)
+            attach_sticky_scene(self._sticky_notes)
         except Exception as exc:
             logger.warning("Sticky Note panel skipped: %s", exc)
             self._sticky_notes = None

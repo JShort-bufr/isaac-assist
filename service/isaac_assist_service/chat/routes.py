@@ -24,6 +24,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
 import uuid
 import logging
+from .code_patches import dedupe_code_patches
 from .orchestrator import ChatOrchestrator
 from .pipeline import PipelinePlanner
 from . import session_trace
@@ -104,7 +105,7 @@ async def send_message(req: ChatMessageRequest):
                     "code": patch["code"],
                     "description": patch["description"],
                 }
-                for patch in result["code_patches"]
+                for patch in dedupe_code_patches(result["code_patches"])
             ]
 
         return {

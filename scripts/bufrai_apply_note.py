@@ -24,7 +24,7 @@ _EXT_ROOT = Path(__file__).resolve().parents[1] / "exts" / "isaac_6.2" / "omni.i
 if str(_EXT_ROOT) not in sys.path:
     sys.path.insert(0, str(_EXT_ROOT))
 
-from omni.isaac.assist.executor.note_apply import apply_note_file
+from omni.isaac.assist.executor.note_apply import apply_note_file, revert_note_file
 
 
 def sidecar_for(stage_path: str) -> Path:
@@ -55,16 +55,52 @@ def select_confirmed_note(notes: list, note_id: str) -> dict:
     return note
 
 
-def mark_note_applied(path: Path, note_id: str) -> None:
+def update_note(path: Path, note_id: str, fields: dict) -> None:
     data = load_sidecar(path)
     notes = data.get("notes") or []
     for note in notes:
         if note.get("id") == note_id:
-            note["status"] = "applied"
+            note.update(fields)
             break
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)
+
+
+def mark_note_applied(path: Path, note_id: str, before=None) -> None:
+    fields = {"status": "applied"}
+    if before is not None:
+        fields["before"] = before
+    update_note(path, note_id, fields)
+
+
+def _select_applied_note(notes: list, note_id: str) -> dict:
+    matches = [note for note in notes if note.get("id") == note_id]
+    if len(matches) != 1:
+        raise ValueError("note id was not found")
+    note = matches[0]
+    if note.get("status") != "applied":
+        raise ValueError("only an applied note can be reverted")
+    if not note.get("before"):
+        raise ValueError("before-values are missing; the note cannot be reverted")
+    return note
+
+
+def _revert(stage_path: str, sidecar: Path, notes: list, note_id: str) -> int:
+    try:
+        note = _select_applied_note(notes, note_id)
+    except ValueError as exc:
+        print(json.dumps({"ok": False, "changed": False, "detail": str(exc)}))
+        return 2
+    result = revert_note_file(stage_path, note.get("before") or {})
+    if result.get("changed") and result.get("saved"):
+        update_note(sidecar, note["id"], {"status": "reverted"})
+        result["status"] = "reverted"
+        print(json.dumps(result))
+        return 0
+    result["status"] = note.get("status")
+    print(json.dumps(result))
+    return 1
 
 
 def run(argv: list) -> int:
@@ -72,14 +108,18 @@ def run(argv: list) -> int:
     parser.add_argument("--stage", required=True, help="Local .usd or .usda file")
     parser.add_argument("--note-id", default="", help="Sidecar note id. Required when several notes are confirmed.")
     parser.add_argument("--sidecar", default="", help="Override <stage>.notes.json")
+    parser.add_argument("--revert", action="store_true", help="Restore before-values recorded at apply time")
     args = parser.parse_args(argv)
     stage_path = str(Path(args.stage).expanduser())
     sidecar = Path(args.sidecar).expanduser() if args.sidecar else sidecar_for(stage_path)
     if not sidecar.is_file():
         print(json.dumps({"ok": False, "changed": False, "detail": "sidecar is missing"}))
         return 1
+    notes = load_sidecar(sidecar).get("notes") or []
+    if args.revert:
+        return _revert(stage_path, sidecar, notes, args.note_id)
     try:
-        note = select_confirmed_note(load_sidecar(sidecar).get("notes") or [], args.note_id)
+        note = select_confirmed_note(notes, args.note_id)
     except ValueError as exc:
         print(json.dumps({"ok": False, "changed": False, "detail": str(exc)}))
         return 2
@@ -88,7 +128,7 @@ def run(argv: list) -> int:
         proposal["prim_path"] = note.get("prim_path") or ""
     result = apply_note_file(stage_path, proposal)
     if result.get("changed") and result.get("saved"):
-        mark_note_applied(sidecar, note["id"])
+        mark_note_applied(sidecar, note["id"], result.get("before"))
         result["status"] = "applied"
         print(json.dumps(result))
         return 0

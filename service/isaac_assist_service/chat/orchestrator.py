@@ -17,6 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from .code_patches import same_code_patch
 from .intent_router import classify_intent
 from ..runtime_profiles import get_runtime_profile
 from ..config import config
@@ -1489,10 +1490,12 @@ class ChatOrchestrator:
                             consecutive_fail_count = 0
                             first_failed_description = ""
                     else:
-                        code_patches.append({
+                        candidate = {
                             "code": result.get("code", ""),
                             "description": result.get("description", ""),
-                        })
+                        }
+                        if not any(same_code_patch(existing, candidate) for existing in code_patches):
+                            code_patches.append(candidate)
 
                 update_knowledge_from_tool(knowledge, fn_name, fn_args, result)
 
