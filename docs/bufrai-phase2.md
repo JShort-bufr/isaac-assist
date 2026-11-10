@@ -51,7 +51,7 @@ Optional query or body fields: `read_only`, `session_layer`, `session_layer_writ
 
 Sticky Note mode in the 6.2 chat window:
 
-1. Drag a rectangle. The extension stores `{x, y, w, h, viewport}` and writes the cropped viewport PNG to the note's `crop_path`. Prims whose screen bounds hit the rect are selected. If none hit, the single current selection is used.
+1. Drag a rectangle on the viewport `Screen` through `DragGesture` (`on_began`, `on_changed`, `on_ended`). The extension stores `{x, y, w, h, viewport}` and writes the cropped viewport PNG to the note's `crop_path`. Prims whose screen bounds hit the rect are selected. If none hit, the single current selection is used. Markers are scene labels on a translation `Transform`.
 2. Markers are anchored to each note's world translation (USD matrix row 3, or `translate`) and recolored by status: proposed, confirmed, applied, rejected, reverted. The Markers toggle hides them. A prim xform change updates the anchor.
 3. The list shows each proposal summary. Confirm all, Confirm, and Reject are clicks. The row shows that note's result. Undo appears on the last applied note's row after it is applied.
 

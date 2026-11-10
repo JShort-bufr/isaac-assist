@@ -60,7 +60,7 @@ On Legion, with head `a3f0549` loaded in both the service and Kit:
 2. Force a `Vec2f` (or other) command failure, such as a list sent where the attribute type is `Gf.Vec2f` if the cast is bypassed, or any command Kit rejects. The stage is unchanged, `/exec_sync` returns JSON, and the note status is `rejected` with the Kit error text in `error`.
 3. Confirm `set_transform` scale `3` still becomes `[3, 3, 3]` and can be undone with `POST /api/v1/notes/{id}/undo`.
 
-GUI checks that this cloud session never ran: drag-rectangle crop PNG, marker pins that follow a moved prim, Confirm all, and an `omniverse://` stage that refuses confirm until a writable session layer is selected.
+The viewport overlay is in `ui/viewport_overlay.py` and is attached from the chat window when Kit is present. A full-frame `Screen` uses `DragGesture` (`on_began` / `on_changed` / `on_ended`), the same shape as the gestures sample and `ovui`. Markers are labels on a row-vector `Transform` at the prim, the same idea as the ui-scene object-info sample. Still confirm on Legion: the crop PNG bytes, that the pin stays on a moved prim, Confirm all, and an `omniverse://` stage that refuses confirm until a writable session layer is selected.
 
 ## Tests already green in the cloud session
 

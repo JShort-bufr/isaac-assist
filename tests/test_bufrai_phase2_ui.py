@@ -29,6 +29,7 @@ import markers  # noqa: E402
 import prim_notes  # noqa: E402
 import region_pick  # noqa: E402
 import sticky_notes  # noqa: E402
+import viewport_overlay  # noqa: E402
 
 
 class _Client:
@@ -195,3 +196,96 @@ def test_batch_confirm_keeps_a_result_per_note_and_custom_data_write():
     locked = {"/World/Locked": {"x": {"comment": "no", "status": "draft", "created_at": "t"}}}
     assert prim_notes.write_notes(stage.prims["/World/Locked"], locked["/World/Locked"]) is False
     assert prim_notes.read_notes(stage.prims["/World/Locked"]) == {}
+
+
+class _Mouse:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+
+class _Payload:
+    def __init__(self, x, y):
+        self.mouse = _Mouse(x, y)
+
+
+class _SceneFrame:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _GestureScene:
+    def __init__(self):
+        self.screens = []
+        self.transforms = []
+        self.labels = []
+
+    class DragGesture:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.gesture_payload = None
+
+    def Screen(self, gesture=None):
+        self.screens.append(gesture)
+        return gesture
+
+    def Transform(self, transform=None):
+        self.transforms.append(transform)
+        return _SceneFrame()
+
+    def Label(self, text, position=None, color=None):
+        self.labels.append((text, position, color))
+        return text
+
+
+def test_drag_gesture_selects_a_prim_and_pins_a_marker():
+    client = _Client()
+    controller = sticky_notes.StickyNoteController(
+        client,
+        stage_path="/tmp/scene.usd",
+        selection_reader=lambda: [],
+        prim_reader=lambda path: {"prim_type": "Cube", "world_transform": {"translate": [1, 2, 3]}},
+    )
+    controller.toggle()
+    scene = _GestureScene()
+    viewport = viewport_overlay.StickyViewport(
+        controller,
+        size_reader=lambda: (800.0, 600.0),
+        bounds_reader=lambda: [{"prim_path": "/World/Cube", "x": 12, "y": 12, "w": 20, "h": 20}],
+    )
+    gesture = viewport_overlay.mount_drag_screen(scene, viewport)
+    assert scene.screens == [gesture]
+    gesture.gesture_payload = _Payload(10, 10)
+    gesture.on_began()
+    gesture.gesture_payload = _Payload(40, 50)
+    gesture.on_changed()
+    gesture.on_ended()
+    assert controller.region["x"] == 10
+    assert controller.region["y"] == 10
+    assert controller.region["w"] == 30
+    assert controller.region["h"] == 40
+    assert controller.region["viewport"] == {"width": 800.0, "height": 600.0}
+    assert controller.selected_paths == ["/World/Cube"]
+    assert viewport.drag.phase == "ended"
+
+    controller.notes = [
+        {
+            "id": "n1",
+            "status": "proposed",
+            "prim_path": "/World/Cube",
+            "world_transform": {"translate": [1, 2, 3]},
+        }
+    ]
+    controller.markers.update(controller.notes)
+    drawn = viewport.invalidate()
+    assert drawn[0]["text"] == "PIN /World/Cube"
+    assert scene.transforms[0][3][:3] == [1.0, 2.0, 3.0]
+    assert scene.labels[0][0] == "PIN /World/Cube"
+
+    idle = viewport_overlay.StickyViewport(controller)
+    assert idle.on_payload(_Payload(1, 1), "ended") is None
+    controller.set_enabled(False)
+    assert viewport.on_payload(_Payload(0, 0), "began") is None

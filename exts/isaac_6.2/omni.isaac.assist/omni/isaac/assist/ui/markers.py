@@ -96,19 +96,43 @@ class MarkerOverlay:
         return [item for item in self._items if item.get("anchor") is not None]
 
 
+def _translation_matrix(anchor: Anchor) -> List[List[float]]:
+    """Row-vector translation, matching ``omni.ui.scene.Matrix44``."""
+    x, y, z = anchor
+    return [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [x, y, z, 1.0],
+    ]
+
+
 def mount_marker_overlay(scene: Any, overlay: MarkerOverlay) -> List[Dict[str, Any]]:
-    """Draw one label per visible anchor when ``scene`` looks like omni.ui.scene."""
+    """Draw one label per visible anchor when ``scene`` looks like omni.ui.scene.
+
+    A ``Transform`` at the prim translation matches the ui-scene object-info
+    sample. A scene that only has ``Label`` still receives ``position``.
+    """
     items = overlay.scene_items()
     if scene is None:
         return items
     label = getattr(scene, "Label", None)
+    transform = getattr(scene, "Transform", None)
     for item in items:
         anchor = item["anchor"]
         text = f"PIN {item['prim_path']}"
-        if callable(label):
-            try:
-                label(text, position=anchor, color=item["color"])
-            except TypeError:
-                label(text)
         item["text"] = text
+        if not callable(label):
+            continue
+        if callable(transform):
+            with transform(transform=_translation_matrix(anchor)):
+                try:
+                    label(text, color=item["color"])
+                except TypeError:
+                    label(text)
+            continue
+        try:
+            label(text, position=anchor, color=item["color"])
+        except TypeError:
+            label(text)
     return items
