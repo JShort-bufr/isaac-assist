@@ -36,6 +36,11 @@ except Exception:
     UsdGeom = None
 
 try:
+    from pxr import Vt
+except Exception:
+    Vt = None
+
+try:
     import omni.kit.undo as omni_undo
 except Exception:
     omni_undo = None
@@ -105,6 +110,108 @@ def _vec3(values: Any) -> Any:
     if not isinstance(values, (list, tuple)) or len(values) != 3:
         raise ValueError("expected 3 numbers")
     return Gf.Vec3d(float(values[0]), float(values[1]), float(values[2]))
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+_SDF_TOKENS = (
+    ("Double3", "double3"),
+    ("Float3", "float3"),
+    ("Half3", "half3"),
+    ("Vector3d", "double3"),
+    ("Point3d", "double3"),
+    ("Normal3d", "double3"),
+    ("Color3d", "double3"),
+    ("Color3f", "float3"),
+    ("Normal3f", "float3"),
+    ("Vector3f", "float3"),
+    ("Point3f", "float3"),
+    ("Quatd", "quatd"),
+    ("Quatf", "quatf"),
+    ("Matrix4d", "matrix4d"),
+    ("Double", "double"),
+    ("Float", "float"),
+    ("Half", "float"),
+    ("Int", "int"),
+    ("Bool", "bool"),
+    ("Token", "token"),
+    ("String", "string"),
+    ("DoubleArray", "double[]"),
+    ("FloatArray", "float[]"),
+    ("IntArray", "int[]"),
+    ("BoolArray", "bool[]"),
+    ("Vec3dArray", "double3[]"),
+    ("Vec3fArray", "float3[]"),
+    ("Vec3hArray", "half3[]"),
+)
+
+_TOKEN_ALIASES = {
+    "vector3d": "double3",
+    "point3d": "double3",
+    "normal3d": "double3",
+    "color3d": "double3",
+    "color3f": "float3",
+    "normal3f": "float3",
+    "vector3f": "float3",
+    "point3f": "float3",
+    "color3h": "half3",
+    "vector3h": "half3",
+    "frame4d": "matrix4d",
+    "half": "float",
+    "uint": "int",
+    "int64": "int",
+    "asset": "string",
+    "doublearray": "double[]",
+    "floatarray": "float[]",
+    "intarray": "int[]",
+    "boolarray": "bool[]",
+    "vec3darray": "double3[]",
+    "vec3farray": "float3[]",
+    "vec3harray": "half3[]",
+}
+
+_GF_FOR_TOKEN = {
+    "double3": "Vec3d",
+    "float3": "Vec3f",
+    "half3": "Vec3h",
+    "quatd": "Quatd",
+    "quatf": "Quatf",
+    "matrix4d": "Matrix4d",
+}
+
+_VT_FOR_ELEMENT = {
+    "double": "DoubleArray",
+    "float": "FloatArray",
+    "int": "IntArray",
+    "bool": "BoolArray",
+    "double3": "Vec3dArray",
+    "float3": "Vec3fArray",
+    "half3": "Vec3hArray",
+}
+
+_SDF_FOR_TOKEN = {
+    "double3": "Double3",
+    "float3": "Float3",
+    "half3": "Half3",
+    "quatd": "Quatd",
+    "quatf": "Quatf",
+    "matrix4d": "Matrix4d",
+    "double": "Double",
+    "float": "Float",
+    "int": "Int",
+    "bool": "Bool",
+    "token": "Token",
+    "string": "String",
+    "double[]": "DoubleArray",
+    "float[]": "FloatArray",
+    "int[]": "IntArray",
+    "bool[]": "BoolArray",
+    "double3[]": "Vec3dArray",
+    "float3[]": "Vec3fArray",
+    "half3[]": "Vec3hArray",
+}
 
 
 def _prim(stage: Any, path: str) -> Any:
@@ -343,9 +450,165 @@ def _command_succeeded(result: Any) -> bool:
 
 
 def _execute_command(name: str, **kwargs: Any) -> None:
-    result = omni_commands.execute(name, **kwargs)
+    try:
+        result = omni_commands.execute(name, **kwargs)
+    except Exception as exc:
+        message = str(exc).strip()
+        raise RuntimeError(message or f"{name} failed") from exc
     if not _command_succeeded(result):
-        raise RuntimeError(f"{name} did not change the stage")
+        message = ""
+        if isinstance(result, tuple) and len(result) > 1 and result[1] is not None:
+            message = str(result[1]).strip()
+        raise RuntimeError(message or f"{name} did not change the stage")
+
+
+def _normalize_type_token(type_name: Any) -> str:
+    """USD type token such as ``double3`` or ``double[]``."""
+    if type_name is None:
+        return ""
+    if not isinstance(type_name, str) and Sdf is not None:
+        names = getattr(Sdf, "ValueTypeNames", None)
+        if names is not None:
+            for attr, token in _SDF_TOKENS:
+                constant = getattr(names, attr, None)
+                if constant is not None and type_name == constant:
+                    return token
+    text = str(getattr(type_name, "typeName", "") or type_name).strip().lower().replace(" ", "")
+    if text.endswith("array") and not text.endswith("[]"):
+        text = text[: -len("array")] + "[]"
+    return _TOKEN_ALIASES.get(text, text)
+
+
+def _sdf_constant(token: str) -> Any:
+    if Sdf is None or not token:
+        return None
+    names = getattr(Sdf, "ValueTypeNames", None)
+    attr = _SDF_FOR_TOKEN.get(token)
+    if names is None or not attr:
+        return None
+    return getattr(names, attr, None)
+
+
+def _already_typed(value: Any, token: str) -> bool:
+    expected = _GF_FOR_TOKEN.get(token)
+    if expected and type(value).__name__ == expected:
+        return True
+    if token.endswith("[]") and type(value).__name__.endswith("Array"):
+        return True
+    return False
+
+
+def _vec3_numbers(value: Any) -> tuple:
+    if _is_number(value):
+        number = float(value)
+        return (number, number, number)
+    values = getattr(value, "values", None)
+    if values is not None and len(tuple(values)) == 3:
+        return tuple(float(item) for item in values)
+    if isinstance(value, (list, tuple)) and len(value) == 3 and all(_is_number(item) for item in value):
+        return (float(value[0]), float(value[1]), float(value[2]))
+    raise ValueError("expected a scalar or 3 numbers")
+
+
+def _quat_numbers(value: Any) -> tuple:
+    values = getattr(value, "values", None)
+    if values is not None and len(tuple(values)) == 4:
+        return tuple(float(item) for item in values)
+    if isinstance(value, (list, tuple)) and len(value) == 4 and all(_is_number(item) for item in value):
+        return tuple(float(item) for item in value)
+    raise ValueError("expected 4 numbers")
+
+
+def _matrix_numbers(value: Any) -> tuple:
+    if isinstance(value, list) and value and isinstance(value[0], (list, tuple)):
+        flat = [float(item) for row in value for item in row]
+    else:
+        values = getattr(value, "values", None)
+        source = values if values is not None else value
+        flat = [float(item) for item in source]
+    if len(flat) != 16:
+        raise ValueError("expected a 4x4 matrix")
+    return tuple(flat)
+
+
+def cast_usd_value(value: Any, type_name: Any) -> Any:
+    """Cast a Python value to the Gf/Vt type Kit commands require.
+
+    A scalar for a vec3 type becomes a uniform vector. Lists stay component-wise.
+    ``type_name`` is an ``Sdf.ValueTypeName`` or a token such as ``double3``.
+    """
+    if Gf is None or value is None:
+        return value
+    token = _normalize_type_token(type_name)
+    if not token or _already_typed(value, token):
+        return value
+    if token in ("double3", "float3", "half3"):
+        numbers = _vec3_numbers(value)
+        factory = getattr(Gf, _GF_FOR_TOKEN[token], None) or Gf.Vec3d
+        return factory(numbers[0], numbers[1], numbers[2])
+    if token in ("quatd", "quatf"):
+        numbers = _quat_numbers(value)
+        factory = getattr(Gf, _GF_FOR_TOKEN[token], None)
+        if factory is None:
+            return list(numbers)
+        return factory(*numbers)
+    if token == "matrix4d":
+        return Gf.Matrix4d(*_matrix_numbers(value))
+    if token in ("double", "float"):
+        return float(value)
+    if token == "int":
+        return int(value)
+    if token == "bool":
+        if isinstance(value, bool):
+            return value
+        raise ValueError("expected bool")
+    if token in ("token", "string"):
+        return value if isinstance(value, str) else str(value)
+    if token.endswith("[]"):
+        return _vt_array(value, token)
+    return value
+
+
+def _vt_array(value: Any, token: str) -> Any:
+    element = token[:-2]
+    items = [cast_usd_value(item, element) for item in list(value)]
+    factory = None
+    if Vt is not None:
+        factory = getattr(Vt, _VT_FOR_ELEMENT.get(element, ""), None)
+    if factory is None:
+        return items
+    return factory(items)
+
+
+def _resolve_type_token(stage: Any, prim_path: str, attr_name: str) -> str:
+    prim = _prim(stage, prim_path) if stage is not None else None
+    if _is_valid(prim) and hasattr(prim, "GetAttribute"):
+        attr = prim.GetAttribute(attr_name)
+        if _is_valid(attr):
+            getter = getattr(attr, "GetTypeName", None)
+            if callable(getter):
+                token = _normalize_type_token(getter())
+                if token:
+                    return token
+    catalog = _usd_types.attribute_type(attr_name)
+    if catalog:
+        return _normalize_type_token(catalog)
+    return ""
+
+
+def _change_property(stage: Any, prim_path: str, attr_name: str, value: Any, context_name: str) -> None:
+    token = _resolve_type_token(stage, prim_path, attr_name)
+    cast = cast_usd_value(value, token) if token else value
+    kwargs: Dict[str, Any] = {
+        "prop_path": f"{prim_path}.{attr_name}",
+        "value": cast,
+        "prev": None,
+        "usd_context_name": context_name,
+    }
+    sdf_type = _sdf_constant(token)
+    if sdf_type is not None:
+        kwargs["type_to_create_if_not_exist"] = sdf_type
+    _execute_command("ChangeProperty", **kwargs)
 
 
 def _edit_blocked(stage: Any, plan: Dict[str, Any]) -> str:
@@ -381,7 +644,7 @@ def _use_session_layer(stage: Any, plan: Dict[str, Any]) -> None:
         setter(layer)
 
 
-def _dispatch_commands(plan: Dict[str, Any], context_name: str) -> str:
+def _dispatch_commands(stage: Any, plan: Dict[str, Any], context_name: str) -> str:
     op = plan.get("op")
     path = _prim_path(plan)
     if op == "set_transform":
@@ -392,21 +655,15 @@ def _dispatch_commands(plan: Dict[str, Any], context_name: str) -> str:
         if scale is None and translate is None and rotate is None and matrix is None:
             raise RuntimeError("transform fields are missing")
         if matrix is not None:
-            _execute_command(
-                "ChangeProperty",
-                prop_path=f"{path}.xformOp:transform",
-                value=matrix,
-                prev=None,
-                usd_context_name=context_name,
-            )
+            _change_property(stage, path, "xformOp:transform", matrix, context_name)
         if scale is not None or translate is not None or rotate is not None:
             kwargs: Dict[str, Any] = {"path": path, "usd_context_name": context_name}
             if scale is not None:
-                kwargs["new_scale"] = _vec3(scale)
+                kwargs["new_scale"] = cast_usd_value(scale, "double3")
             if translate is not None:
-                kwargs["new_translation"] = _vec3(translate)
+                kwargs["new_translation"] = cast_usd_value(translate, "double3")
             if rotate is not None:
-                kwargs["new_rotation_euler"] = _vec3(rotate)
+                kwargs["new_rotation_euler"] = cast_usd_value(rotate, "double3")
             _execute_command("TransformPrimSRT", **kwargs)
         return "set_transform"
     if op == "set_attribute":
@@ -414,13 +671,7 @@ def _dispatch_commands(plan: Dict[str, Any], context_name: str) -> str:
         if not pairs:
             raise RuntimeError("attribute value is missing")
         for name, value in pairs.items():
-            _execute_command(
-                "ChangeProperty",
-                prop_path=f"{path}.{name}",
-                value=value,
-                prev=None,
-                usd_context_name=context_name,
-            )
+            _change_property(stage, path, name, value, context_name)
         return "set_attribute"
     if op == "add_prim":
         if not path:
@@ -443,18 +694,53 @@ def _dispatch_commands(plan: Dict[str, Any], context_name: str) -> str:
     raise RuntimeError("unsupported op")
 
 
+def _undo_depth() -> Optional[int]:
+    if omni_undo is None:
+        return None
+    for name in ("get_stack", "get_history"):
+        getter = getattr(omni_undo, name, None)
+        if callable(getter):
+            try:
+                return len(getter())
+            except Exception:
+                continue
+    stack = getattr(omni_undo, "stack", None)
+    if isinstance(stack, list):
+        return len(stack)
+    return None
+
+
+def _rollback_failed_group(depth_before: Optional[int]) -> bool:
+    """Undo this group when it recorded commands. An empty group is left alone."""
+    undo = getattr(omni_undo, "undo", None) if omni_undo is not None else None
+    if not callable(undo):
+        return False
+    depth_after = _undo_depth()
+    if depth_before is not None and depth_after is not None:
+        if depth_after <= depth_before:
+            return False
+    undo()
+    return True
+
+
 def _apply_via_commands(stage: Any, plan: Dict[str, Any]) -> Dict[str, Any]:
     before = capture_before(stage, plan)
     context_name = _usd_context_name()
     _use_session_layer(stage, plan)
+    depth_before = _undo_depth()
     omni_undo.begin_group()
+    failed = False
     try:
-        detail = _dispatch_commands(plan, context_name)
+        detail = _dispatch_commands(stage, plan, context_name)
         result = _result(plan, ok=True, changed=True, detail=detail)
     except Exception as exc:
+        failed = True
         result = _result(plan, ok=False, changed=False, detail=str(exc))
+        result["command_failed"] = True
     finally:
         omni_undo.end_group()
+    if failed:
+        result["rolled_back"] = _rollback_failed_group(depth_before)
     result["before"] = before
     result["undo_group"] = True
     return result

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_bufrai_phase1_apply import _Prim, _Stage, _Vec, _install_pxr, _load_note_apply
+from tests.test_bufrai_phase1_apply import _Attr, _Prim, _Stage, _Vec, _install_pxr, _load_note_apply
 
 pytestmark = pytest.mark.l0
 
@@ -153,6 +153,256 @@ def _assert_nucleus_gate(note_apply):
     assert allowed["changed"] is True
     assert [name for name, _kwargs in commands.calls] == ["CreatePrim", "CreateDefaultXformOnPrim"]
     assert session["target"] == "session-layer"
+
+
+class _GfValue(tuple):
+    def __new__(cls, *values):
+        if len(values) == 1 and isinstance(values[0], (list, tuple)):
+            values = tuple(values[0])
+        return tuple.__new__(cls, tuple(float(item) for item in values))
+
+
+class _Vec3d(_GfValue):
+    pass
+
+
+class _Vec3f(_GfValue):
+    pass
+
+
+class _Vec3h(_GfValue):
+    pass
+
+
+class _Quatd(_GfValue):
+    pass
+
+
+class _Quatf(_GfValue):
+    pass
+
+
+class _Matrix4d(_GfValue):
+    pass
+
+
+class _VtArray(tuple):
+    def __new__(cls, values):
+        return tuple.__new__(cls, tuple(values))
+
+
+def _install_gf_types(note_apply):
+    gf = note_apply.Gf
+    gf.Vec3d = _Vec3d
+    gf.Vec3f = _Vec3f
+    gf.Vec3h = _Vec3h
+    gf.Quatd = _Quatd
+    gf.Quatf = _Quatf
+    gf.Matrix4d = _Matrix4d
+    names = note_apply.Sdf.ValueTypeNames
+    names.Float3 = "float3"
+    names.Half3 = "half3"
+    names.Quatd = "quatd"
+    names.Quatf = "quatf"
+    names.Matrix4d = "matrix4d"
+    names.Float = "float"
+    names.DoubleArray = "double[]"
+    names.Vec3dArray = "double3[]"
+    note_apply.Vt = type(
+        "Vt",
+        (),
+        {
+            "DoubleArray": type("DoubleArray", (_VtArray,), {}),
+            "FloatArray": type("FloatArray", (_VtArray,), {}),
+            "IntArray": type("IntArray", (_VtArray,), {}),
+            "BoolArray": type("BoolArray", (_VtArray,), {}),
+            "Vec3dArray": type("Vec3dArray", (_VtArray,), {}),
+            "Vec3fArray": type("Vec3fArray", (_VtArray,), {}),
+            "Vec3hArray": type("Vec3hArray", (_VtArray,), {}),
+        },
+    )
+
+
+class _TypedPrim(_Prim):
+    def __init__(self, path, types):
+        super().__init__(path)
+        self._types = dict(types)
+
+    def GetAttribute(self, name):
+        if name not in self._types:
+            return None
+        attr = _Attr()
+        token = self._types[name]
+        attr.GetTypeName = lambda token=token: token
+        return attr
+
+
+def _wire(note_apply, stage, commands, undo):
+    note_apply.omni_commands = commands
+    note_apply.omni_undo = undo
+    note_apply.omni_usd = type("Usd", (), {"get_context": staticmethod(lambda: _Context(stage))})()
+
+
+def test_change_property_casts_python_values_to_gf_types():
+    note_apply = _module()
+    try:
+        _install_gf_types(note_apply)
+        _assert_gf_casts(note_apply)
+    finally:
+        _drop_pxr()
+
+
+def _assert_gf_casts(note_apply):
+    assert note_apply.cast_usd_value(4, "double3") == _Vec3d(4.0, 4.0, 4.0)
+    assert note_apply.cast_usd_value([4, 4, 4], note_apply.Sdf.ValueTypeNames.Double3) == _Vec3d(4.0, 4.0, 4.0)
+    assert note_apply.cast_usd_value([1, 0, 0], "float3") == _Vec3f(1.0, 0.0, 0.0)
+    assert note_apply.cast_usd_value(0.5, "half3") == _Vec3h(0.5, 0.5, 0.5)
+    assert note_apply.cast_usd_value([0, 0, 0, 1], "quatd") == _Quatd(0.0, 0.0, 0.0, 1.0)
+    assert note_apply.cast_usd_value([1, 0, 0, 0], "quatf") == _Quatf(1.0, 0.0, 0.0, 0.0)
+    matrix = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+    assert note_apply.cast_usd_value(matrix, "matrix4d") == _Matrix4d(*[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
+    assert note_apply.cast_usd_value(2, "double") == 2.0
+    assert note_apply.cast_usd_value(3, "int") == 3
+    assert note_apply.cast_usd_value(True, "bool") is True
+    doubles = note_apply.cast_usd_value([1, 2], "double[]")
+    assert type(doubles).__name__ == "DoubleArray"
+    assert doubles == (1.0, 2.0)
+    vectors = note_apply.cast_usd_value([[1, 0, 0], [0, 1, 0]], "double3[]")
+    assert type(vectors).__name__ == "Vec3dArray"
+    assert vectors[0] == _Vec3d(1.0, 0.0, 0.0)
+
+    stage = _Stage()
+    stage.prims["/World/Cube"] = _TypedPrim(
+        "/World/Cube",
+        {"displayColor": "float3", "xformOp:orient": "quatd"},
+    )
+    commands = _Commands()
+    _wire(note_apply, stage, commands, _Undo())
+    scalar = note_apply.apply_plan_on_open_stage(
+        {
+            "op": "set_attribute",
+            "prim_path": "/World/Cube",
+            "payload": {"xformOp:scale": 4},
+            "executable": True,
+        }
+    )
+    listed = note_apply.apply_plan_on_open_stage(
+        {
+            "op": "set_attribute",
+            "prim_path": "/World/Cube",
+            "payload": {"xformOp:scale": [4, 4, 4]},
+            "executable": True,
+        }
+    )
+    colored = note_apply.apply_plan_on_open_stage(
+        {
+            "op": "set_attribute",
+            "prim_path": "/World/Cube",
+            "payload": {"displayColor": [0.2, 0.4, 0.6]},
+            "executable": True,
+        }
+    )
+    assert scalar["changed"] is True
+    assert listed["changed"] is True
+    assert colored["changed"] is True
+    scale_values = [kwargs["value"] for name, kwargs in commands.calls if kwargs.get("prop_path", "").endswith("xformOp:scale")]
+    assert scale_values == [_Vec3d(4.0, 4.0, 4.0), _Vec3d(4.0, 4.0, 4.0)]
+    assert all(not isinstance(value, list) for value in scale_values)
+    assert scale_values[0].__class__ is _Vec3d
+    color = next(kwargs["value"] for name, kwargs in commands.calls if kwargs.get("prop_path", "").endswith("displayColor"))
+    assert color == _Vec3f(0.2, 0.4, 0.6)
+    transform = note_apply.apply_plan_on_open_stage(
+        {"op": "set_transform", "prim_path": "/World/Cube", "scale": 3, "executable": True}
+    )
+    assert transform["changed"] is True
+    srt = next(kwargs for name, kwargs in commands.calls if name == "TransformPrimSRT")
+    assert srt["new_scale"] == _Vec3d(3.0, 3.0, 3.0)
+
+
+def test_failed_kit_command_rolls_back_and_leaves_the_stage_unchanged():
+    note_apply = _module()
+    try:
+        _install_gf_types(note_apply)
+        _assert_failed_command_rolls_back(note_apply)
+    finally:
+        _drop_pxr()
+
+
+def _assert_failed_command_rolls_back(note_apply):
+    stage = _Stage()
+    prim = _Prim("/World/Cube")
+    original = _Vec3d(3.0, 3.0, 3.0)
+    prim.attrs["xformOp:scale"] = type("Attr", (), {"value": original, "IsValid": lambda self: True})()
+    stage.prims["/World/Cube"] = prim
+    class _RestoringUndo(_Undo):
+        def __init__(self):
+            super().__init__()
+            self.stack = []
+
+        def undo(self):
+            super().undo()
+            if self.stack:
+                self.stack.pop()()
+
+    commands = _Commands()
+    undo = _RestoringUndo()
+    message = "Type mismatch for </World/Cube.xformOp:scale>: expected 'GfVec3d', got 'vector<VtValue, allocator<VtValue> >'"
+
+    def execute(name, **kwargs):
+        commands.calls.append((name, kwargs))
+        if name != "ChangeProperty":
+            return (True, name)
+        old = prim.attrs["xformOp:scale"].value
+        prim.attrs["xformOp:scale"].value = kwargs["value"]
+
+        def restore(previous=old):
+            prim.attrs["xformOp:scale"].value = previous
+
+        undo.stack.append(restore)
+        raise RuntimeError(message)
+
+    commands.execute = execute
+    _wire(note_apply, stage, commands, undo)
+    result = note_apply.apply_plan_on_open_stage(
+        {
+            "op": "set_attribute",
+            "prim_path": "/World/Cube",
+            "payload": {"xformOp:scale": 4},
+            "executable": True,
+        }
+    )
+    assert result["changed"] is False
+    assert result["command_failed"] is True
+    assert result["rolled_back"] is True
+    assert message in result["detail"]
+    assert undo.groups == ["begin", "end"]
+    assert undo.undos == 1
+    assert prim.attrs["xformOp:scale"].value == original
+    assert commands.calls[0][1]["value"] == _Vec3d(4.0, 4.0, 4.0)
+
+    refused = _Commands()
+
+    def refuse(name, **kwargs):
+        refused.calls.append((name, kwargs))
+        return (False, message)
+
+    refused.execute = refuse
+    quiet = _RestoringUndo()
+    _wire(note_apply, stage, refused, quiet)
+    missed = note_apply.apply_plan_on_open_stage(
+        {
+            "op": "set_attribute",
+            "prim_path": "/World/Cube",
+            "payload": {"xformOp:scale": [4, 4, 4]},
+            "executable": True,
+        }
+    )
+    assert missed["command_failed"] is True
+    assert missed["changed"] is False
+    assert message in missed["detail"]
+    assert quiet.groups == ["begin", "end"]
+    assert quiet.undos == 0
+    assert prim.attrs["xformOp:scale"].value == original
 
 
 def test_headless_revert_restores_recorded_before_values(tmp_path, monkeypatch):

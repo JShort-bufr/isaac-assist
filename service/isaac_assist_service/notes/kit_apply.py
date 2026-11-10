@@ -74,6 +74,7 @@ async def apply_via_kit(plan: Dict[str, Any]) -> Dict[str, Any]:
             "applied": False,
             "kit_connected": True,
             "changed": False,
+            "command_failed": bool((parsed or {}).get("command_failed")),
             "detail": str(detail),
         }
     return {

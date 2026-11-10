@@ -323,6 +323,37 @@ async def test_nucleus_and_readonly_fail_closed_unless_session_layer(client, tmp
     assert NoteStore(str(locked), read_only=True).kind == "readonly"
 
 
+async def test_kit_command_failure_rejects_the_note(client, tmp_path, monkeypatch):
+    from service.isaac_assist_service.notes import kit_apply
+
+    async def kit_up():
+        return True
+
+    async def exec_sync(code, timeout=30):
+        detail = "Type mismatch for </World/Cube.xformOp:scale>: expected 'GfVec3d', got 'vector<VtValue, allocator<VtValue> >'"
+        return {
+            "success": True,
+            "output": 'ISAAC_ASSIST_NOTE_RESULT {"ok": false, "changed": false, "command_failed": true, "detail": "%s"}' % detail,
+        }
+
+    monkeypatch.setattr(kit_apply.kit_tools, "is_kit_rpc_alive", kit_up)
+    monkeypatch.setattr(kit_apply.kit_tools, "exec_sync", exec_sync)
+    monkeypatch.setattr(
+        "service.isaac_assist_service.notes.proposals.complete_with_chain",
+        _llm('{"op":"set_attribute","prim_path":"/World/Cube","payload":{"xformOp:scale":4}}'),
+    )
+    stage = _stage(tmp_path)
+    note_id = await _propose(client, stage, "/World/Cube", "scale by 4")
+    refused = await client.post(f"/api/v1/notes/{note_id}/confirm", params={"stage_path": stage})
+    assert refused.status_code == 200
+    body = refused.json()
+    assert body["applied"] is False
+    assert body["note"]["status"] == "rejected"
+    assert "GfVec3d" in body["note"]["error"]
+    assert body["note"]["status"] != "confirmed"
+    assert NoteStore(stage).get(note_id)["status"] == "rejected"
+
+
 async def test_undo_uses_kit_and_fails_closed(client, tmp_path, monkeypatch):
     from service.isaac_assist_service.notes import kit_apply
 

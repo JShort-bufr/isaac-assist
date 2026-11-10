@@ -240,12 +240,18 @@ async def _confirm_existing(store: NoteStore, note: Dict[str, Any]) -> Dict[str,
     outcome = await apply_via_kit(_plan_for_kit(proposal, store))
     if outcome.get("before") is not None:
         note["before"] = outcome["before"]
-    note["error"] = "" if outcome["applied"] else str(outcome.get("detail") or "")
+    command_failed = bool(outcome.get("command_failed"))
+    detail = str(outcome.get("detail") or "")
     if outcome["applied"]:
         note["status"] = "applied"
         note["applied_seq"] = store.next_applied_seq()
+        note["error"] = ""
+    elif command_failed:
+        note["status"] = "rejected"
+        note["error"] = detail
     else:
         note["status"] = "confirmed"
+        note["error"] = "" if outcome["applied"] else detail
     store.update(note)
     logger.info(
         "note confirm; id=%s status=%s kit_connected=%s",
@@ -253,15 +259,19 @@ async def _confirm_existing(store: NoteStore, note: Dict[str, Any]) -> Dict[str,
         note["status"],
         outcome["kit_connected"],
     )
-    return {
+    body = {
         "id": note_id,
-        "ok": True,
+        "ok": outcome["applied"] or not command_failed,
         "applied": outcome["applied"],
         "kit_connected": outcome["kit_connected"],
         "status": note["status"],
-        "detail": outcome["detail"],
+        "detail": detail,
         "note": note,
     }
+    if command_failed:
+        body["ok"] = False
+        body["error"] = detail
+    return body
 
 
 def _reject_existing(store: NoteStore, note: Dict[str, Any]) -> Dict[str, Any]:

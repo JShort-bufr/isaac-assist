@@ -17,7 +17,7 @@ Before that call, the proposal is checked against known USD types:
 - Any other known attribute must already match its type (`double3`, `double`, `matrix4d`, `quatd`, `token`, `bool`).
 - A mismatch is not sent to Kit. The note status becomes `rejected` and `error` explains the type. A later headless apply only accepts `confirmed` notes, so the bad op cannot land.
 
-`omni.kit.commands` performs the live edit (`TransformPrimSRT`, `ChangeProperty`, `CreatePrim`, `CreateDefaultXformOnPrim`) inside one `omni.kit.undo` group, with `usd_context_name`. `POST /api/v1/notes/{id}/undo` calls `omni.kit.undo.undo()` for the last applied note and sets status `reverted`. If Kit is down, the status stays `applied`.
+`omni.kit.commands` performs the live edit (`TransformPrimSRT`, `ChangeProperty`, `CreatePrim`, `CreateDefaultXformOnPrim`) inside one `omni.kit.undo` group, with `usd_context_name`. Values passed to those commands are cast from the attribute `typeName` to `Gf` (`Vec3d` / `Vec3f` / `Vec3h`, `Quatd` / `Quatf`, `Matrix4d`, float, int, bool) or `Vt` arrays. A scalar scale is a uniform `Gf.Vec3d`. If a command in the group fails, the group is closed and rolled back, and the note becomes `rejected` with that error. `POST /api/v1/notes/{id}/undo` calls `omni.kit.undo.undo()` for the last applied note and sets status `reverted`. If Kit is down, the status stays `applied`.
 
 The headless script still uses raw `pxr`. It records `before` on the sidecar and `--revert` restores those values.
 
