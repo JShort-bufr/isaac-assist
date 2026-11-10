@@ -1,3 +1,7 @@
+# Modified work, 2026 — isaac-assist-frame phase 1 (Isaac Sim 6.2).
+# Derived from k3street/Omniverse_Nemotron_Ext (Apache-2.0).
+# Changes: add the isaacsim-6.2 profile (6.0 APIs, 6.2 tags).
+
 """Runtime profiles for Isaac Sim / Isaac Lab compatibility.
 
 The code suggestion layer must not mix Isaac Sim 5.1-era recipes with
@@ -77,17 +81,55 @@ ISAAC_SIM_60 = RuntimeProfile(
     notes="Isaac Sim 6.0 / Isaac Lab 3.x recipes must be explicitly verified for 6.0 APIs.",
 )
 
+ISAAC_SIM_62 = RuntimeProfile(
+    key="isaacsim-6.2",
+    isaac_sim_version="6.2.0",
+    isaac_lab_version="3.x",
+    code_pattern_version="6.2.0",
+    default_template_scope="6.2.0",
+    ros2_omnigraph_namespace="isaacsim.ros2.nodes",
+    extension_folder="exts/isaac_6.2",
+    knowledge_files=(
+        "workspace/knowledge/code_patterns_6.0.0.jsonl",
+        "workspace/knowledge/knowledge_6.0.0.jsonl",
+        "workspace/knowledge/negative_patterns_6.0.0.jsonl",
+    ),
+    template_policy=(
+        "6.2 uses the 6.0 API lane. Templates tagged isaacsim-6.2, 6.2, 6.2.0, "
+        "isaacsim-6.0, 6.0, 6.0.0, or any may be used."
+    ),
+    qa_policy="6.2 QA must be tagged. Live Isaac Sim 6.2 evidence is UNVERIFIED until the Legion smoke.",
+    launch_selector="./launch_isaac.sh --version 6.2",
+    api_scope=(
+        "Inherit the Isaac Sim 6.0 API lane, including isaacsim.ros2.nodes.* OmniGraph node type strings.",
+        "Python 3.12 runtime on Isaac Sim 6.x.",
+        "Prefer pxr/omni.usd for conservative USD edits shared with 6.0.",
+        "Do not treat unverified 6.2-only Kit APIs as known-good.",
+    ),
+    notes=(
+        "Isaac Sim 6.2 profile: 6.0 APIs with 6.2 tags. Target VERSION 6.2.0. "
+        "Python 3.12. A split 6.2 knowledge corpus and live 6.0-to-6.2 API diffs are UNVERIFIED."
+    ),
+)
+
 
 _PROFILES = {
     ISAAC_SIM_51.key: ISAAC_SIM_51,
     ISAAC_SIM_60.key: ISAAC_SIM_60,
+    ISAAC_SIM_62.key: ISAAC_SIM_62,
     "5.1": ISAAC_SIM_51,
     "5.1.0": ISAAC_SIM_51,
     "isaacsim_5.1": ISAAC_SIM_51,
     "6.0": ISAAC_SIM_60,
     "6.0.0": ISAAC_SIM_60,
     "isaacsim_6.0": ISAAC_SIM_60,
+    "6.2": ISAAC_SIM_62,
+    "6.2.0": ISAAC_SIM_62,
+    "isaacsim_6.2": ISAAC_SIM_62,
 }
+
+_SIX_OH_TAGS = {"isaacsim-6.0", "6.0", "6.0.0"}
+_SIX_TWO_TAGS = {"isaacsim-6.2", "6.2", "6.2.0"}
 
 
 def get_runtime_profile(profile: Optional[str] = None) -> RuntimeProfile:
@@ -106,6 +148,8 @@ def get_runtime_profile(profile: Optional[str] = None) -> RuntimeProfile:
         or os.environ.get("ISAAC_SIM_PATH")
         or ""
     )
+    if "6.2" in path:
+        return ISAAC_SIM_62
     if "6.0" in path or "/IsaacSim/" in path or path.endswith("/IsaacSim"):
         return ISAAC_SIM_60
     return ISAAC_SIM_51
@@ -173,21 +217,43 @@ def metadata_matches_profile(
     """
     runtime_profiles = _as_list(metadata.get("runtime_profiles") or metadata.get("runtime_profile"))
     if runtime_profiles:
-        return profile.key in runtime_profiles or "*" in runtime_profiles or "any" in runtime_profiles
+        if profile.key in runtime_profiles or "*" in runtime_profiles or "any" in runtime_profiles:
+            return True
+        if profile.key == ISAAC_SIM_62.key and any(
+            item in _SIX_OH_TAGS or item in _SIX_TWO_TAGS for item in runtime_profiles
+        ):
+            return True
+        return False
 
     sim_versions = _as_list(metadata.get("isaac_sim_versions") or metadata.get("isaac_sim_version"))
     if sim_versions:
-        return _matches_any(profile.isaac_sim_version, sim_versions)
+        if _matches_any(profile.isaac_sim_version, sim_versions):
+            return True
+        if profile.key == ISAAC_SIM_62.key and _matches_any(ISAAC_SIM_60.isaac_sim_version, sim_versions):
+            return True
+        return False
 
     version_scope = _as_list(metadata.get("version_scope"))
     if version_scope:
-        return _matches_any(profile.isaac_sim_version, version_scope)
+        if _matches_any(profile.isaac_sim_version, version_scope):
+            return True
+        if profile.key == ISAAC_SIM_62.key and _matches_any(ISAAC_SIM_60.isaac_sim_version, version_scope):
+            return True
+        return False
 
     return _matches_any(profile.isaac_sim_version, [unscoped_default])
 
 
 def prompt_runtime_rules(profile: RuntimeProfile) -> str:
     """Concise prompt block that tells coding agents which API lane to stay in."""
+    if profile.key == ISAAC_SIM_62.key:
+        return f"""\
+ACTIVE RUNTIME PROFILE: {profile.key}
+- Isaac Sim: {profile.isaac_sim_version}; Isaac Lab: {profile.isaac_lab_version}; Python 3.12.
+- API lane matches Isaac Sim 6.0 with 6.2 tags. Do not invent 6.2-only Kit calls that are not in the 6.0 lane.
+- ROS2 OmniGraph node type namespace is `{profile.ros2_omnigraph_namespace}`.
+- Templates tagged isaacsim-6.2 or isaacsim-6.0 (or version 6.2.0 / 6.0.0 / any) are in scope.
+- Live 6.0-to-6.2 behavioral diffs are UNVERIFIED until the Legion smoke."""
     if profile.key == ISAAC_SIM_60.key:
         return f"""\
 ACTIVE RUNTIME PROFILE: {profile.key}

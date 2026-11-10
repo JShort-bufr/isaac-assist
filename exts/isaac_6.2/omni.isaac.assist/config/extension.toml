@@ -1,0 +1,29 @@
+# Modified work, 2026 — isaac-assist-frame phase 1 (Isaac Sim 6.2).
+# Derived from k3street/Omniverse_Nemotron_Ext (Apache-2.0).
+# Changes: retarget this copy at Isaac Sim VERSION 6.2.0, Python 3.12.
+# API lane matches Isaac Sim 6.0. Kit SDK pin is UNVERIFIED.
+
+[package]
+version = "6.2.0"
+category = "Assistants"
+title = "Isaac Assist"
+description = "Isaac Assist for Isaac Sim 6.2 (VERSION 6.2.0, Python 3.12). API lane matches Isaac Sim 6.0 with 6.2 tags. USD authoring, OmniGraph, physics, materials, sensors, viewport, and debugging via LLM orchestration."
+authors = ["10Things, Inc."]
+repository = "http://www.10things.tech"
+keywords = ["isaac", "assist", "ai", "llm", "multimodal", "livekit", "omnigraph", "usd", "physics"]
+changelog = "Docs/01_EXTENSION_SHELL.md"
+readme = "Docs/00_INDEX.md"
+icon = "" # Add an icon later
+
+[dependencies]
+"omni.kit.uiapp" = {}
+"omni.ui" = {}
+"omni.kit.viewport.utility" = {} # Required for LiveKit WebRTC viewport grabbing
+"omni.graph.core" = {}
+"isaacsim.core.nodes" = {}
+"isaacsim.sensors.physics.nodes" = {}
+"isaacsim.ros2.bridge" = {}
+"isaacsim.ros2.nodes" = {}
+
+[[python.module]]
+name = "omni.isaac.assist"

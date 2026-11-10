@@ -1,3 +1,7 @@
+# Modified work, 2026 — isaac-assist-frame phase 1 (Isaac Sim 6.2).
+# Derived from k3street/Omniverse_Nemotron_Ext (Apache-2.0).
+# Changes: accept LLM_MODE=chain beside the existing provider modes.
+
 import asyncio
 import json
 import logging
@@ -86,7 +90,7 @@ async def pull_local_model(req: ModelPullRequest, background_tasks: BackgroundTa
 
 # ── Quick LLM mode switch ────────────────────────────────────────────────────
 
-VALID_MODES = ("local", "google", "anthropic", "openai", "grok", "gemini")
+VALID_MODES = ("local", "google", "anthropic", "openai", "grok", "gemini", "chain")
 
 
 class ModeSwitchRequest(BaseModel):
@@ -178,7 +182,7 @@ async def switch_llm_mode(req: ModeSwitchRequest):
     """
     Hot-switch the LLM provider without restarting the service.
 
-    Accepted modes: local, google, anthropic, openai, grok
+    Accepted modes: local, google, anthropic, openai, grok, gemini, chain
     """
     mode = req.mode.strip().lower()
     if mode not in VALID_MODES:

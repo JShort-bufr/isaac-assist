@@ -1,3 +1,7 @@
+# Modified work, 2026 — isaac-assist-frame phase 1 (Isaac Sim 6.2).
+# Derived from k3street/Omniverse_Nemotron_Ext (Apache-2.0).
+# Changes: mount notes and provider-status routes; accept LLM_MODE=chain.
+
 import logging
 from pathlib import Path
 from fastapi import FastAPI
@@ -25,6 +29,8 @@ from .finetune.routes import router as finetune_router
 from .scene_workspace.routes import router as scene_workspace_router
 from .manipulation.routes import router as manipulation_router
 from .multimodal.routes import router as multimodal_canvas_router
+from .notes.routes import router as notes_router
+from .providers.routes import router as providers_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 def _active_model_name(config):
     mode = (config.llm_mode or "local").lower()
-    if mode == "local":
+    if mode in ("local", "chain"):
         return config.local_model_name
     if mode in ("google", "gemini", "cloud"):
         return config.gemini_model_name
@@ -67,6 +73,8 @@ app.include_router(finetune_router, prefix="/api/v1/finetune", tags=["Fine-tunin
 app.include_router(scene_workspace_router, prefix="/api/v1/scenes", tags=["Scene Workspace"])
 app.include_router(manipulation_router, prefix="/api/v1/manipulation", tags=["Manipulation Planner"])
 app.include_router(multimodal_canvas_router, prefix="/api/v1/canvas", tags=["Multimodal Canvas"])
+app.include_router(notes_router, prefix="/api/v1/notes", tags=["Sticky Notes"])
+app.include_router(providers_router, prefix="/api/v1/providers", tags=["Providers"])
 
 _floorplan_dist = Path(__file__).resolve().parents[2] / "web" / "floor-plan-ui" / "dist"
 if _floorplan_dist.exists():
@@ -86,7 +94,7 @@ if __name__ == "__main__":
     import argparse
     import uvicorn
 
-    VALID_MODES = ["local", "google", "anthropic", "openai", "grok"]
+    VALID_MODES = ["local", "google", "anthropic", "openai", "grok", "chain"]
 
     parser = argparse.ArgumentParser(description="Isaac Assist Service")
     parser.add_argument(

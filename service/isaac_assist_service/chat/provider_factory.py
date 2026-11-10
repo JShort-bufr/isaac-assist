@@ -1,8 +1,13 @@
+# Modified work, 2026 — isaac-assist-frame phase 1 (Isaac Sim 6.2).
+# Derived from k3street/Omniverse_Nemotron_Ext (Apache-2.0).
+# Changes: LLM_MODE=chain selects the phase-1 provider fallback chain.
+
 from .llm_ollama import OllamaProvider
 from .llm_gemini import GeminiProvider
 from .llm_anthropic import AnthropicProvider
 from .llm_openai_compat import OpenAICompatProvider, PROVIDER_URLS
 from ..config import config
+from ..providers.chain import FallbackChainProvider
 
 
 def get_llm_provider():
@@ -15,8 +20,12 @@ def get_llm_provider():
       anthropic   → Claude (CLOUD_MODEL_NAME + ANTHROPIC_API_KEY)
       openai      → OpenAI (CLOUD_MODEL_NAME + OPENAI_API_KEY)
       grok        → xAI Grok (CLOUD_MODEL_NAME + GROK_API_KEY / XAI_API_KEY)
+      chain       → legion-ollama, then NVIDIA, then offline (ISAAC_ASSIST_PROVIDER_ORDER)
     """
     mode = config.llm_mode.lower()
+
+    if mode == "chain":
+        return FallbackChainProvider()
 
     if mode == "anthropic":
         _require(config.api_key_anthropic, "ANTHROPIC_API_KEY", mode)
