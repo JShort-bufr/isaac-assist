@@ -81,4 +81,47 @@ async def apply_via_kit(plan: Dict[str, Any]) -> Dict[str, Any]:
         "kit_connected": True,
         "changed": True,
         "detail": str(parsed.get("detail") or "stage updated"),
+        "before": parsed.get("before"),
+    }
+
+
+def build_kit_undo_code() -> str:
+    """Python that asks Kit to undo the most recent command group."""
+    marker = json.dumps(MARKER)
+    return (
+        "import json\n"
+        "from omni.isaac.assist.executor.note_apply import undo_last_on_open_stage\n"
+        "_result = undo_last_on_open_stage()\n"
+        f"print({marker} + ' ' + json.dumps(_result))\n"
+    )
+
+
+async def undo_via_kit() -> Dict[str, Any]:
+    """Undo one Kit command group. Fail closed when Kit is absent."""
+    alive = await kit_tools.is_kit_rpc_alive()
+    if not alive:
+        return {
+            "reverted": False,
+            "kit_connected": False,
+            "detail": "Kit is not connected; the note was not reverted",
+        }
+    result = await kit_tools.exec_sync(build_kit_undo_code(), timeout=30)
+    if not result.get("success"):
+        return {
+            "reverted": False,
+            "kit_connected": True,
+            "detail": "Kit did not revert the note",
+        }
+    parsed = parse_kit_exec_output(result.get("output") or "")
+    if not parsed or not parsed.get("ok") or not parsed.get("reverted"):
+        detail = (parsed or {}).get("detail") or "Kit did not revert the note"
+        return {
+            "reverted": False,
+            "kit_connected": True,
+            "detail": str(detail),
+        }
+    return {
+        "reverted": True,
+        "kit_connected": True,
+        "detail": str(parsed.get("detail") or "reverted"),
     }

@@ -69,6 +69,11 @@ provider. Logs say `key present: yes` or `key present: no` and never the key.
 
 ## Sticky notes
 
+Phase 2 (region crops, pinned markers, batch review, prim customData,
+Nucleus fail-closed, and Kit-command undo) is in `docs/bufrai-phase2.md`.
+The behavior below is the phase 1 contract the phase 2 routes still honor
+for a writable local stage.
+
 A note is `{id, created_at, prim_path, prim_type, key_attributes, world_transform, region, crop_path, comment, status, proposal}`.
 
 `status` is `draft`, `sent`, `proposed`, `confirmed`, `applied`, or `rejected`.

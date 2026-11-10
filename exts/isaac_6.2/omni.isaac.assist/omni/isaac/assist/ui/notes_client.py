@@ -19,6 +19,20 @@ from urllib.request import Request, urlopen
 Transport = Callable[[str, str, Optional[dict], Optional[dict]], dict]
 
 
+def _present_flags(flags: Dict[str, Any]) -> Dict[str, Any]:
+    kept = {}
+    for key in ("read_only", "session_layer", "session_layer_writable"):
+        if key in flags and flags[key] not in ("", False, None):
+            kept[key] = flags[key]
+    return kept
+
+
+def _query(stage_path: str, flags: Dict[str, Any]) -> Dict[str, Any]:
+    query = {"stage_path": stage_path}
+    query.update(_present_flags(flags))
+    return query
+
+
 class NotesClientError(RuntimeError):
     def __init__(self, status: int, detail: str):
         super().__init__(f"notes http {status}")
@@ -47,29 +61,44 @@ class NotesClient:
             {"stage_path": stage_path, "id": note_id},
         )
 
-    def send(self, stage_path: str, ids: list) -> Dict[str, Any]:
-        return self._request(
-            "POST",
-            "/api/v1/notes/send",
-            {"stage_path": stage_path, "ids": list(ids)},
-            None,
-        )
+    def send(self, stage_path: str, ids: list, **flags: Any) -> Dict[str, Any]:
+        body = {"stage_path": stage_path, "ids": list(ids)}
+        body.update(_present_flags(flags))
+        return self._request("POST", "/api/v1/notes/send", body, None)
 
-    def confirm(self, stage_path: str, note_id: str) -> Dict[str, Any]:
+    def confirm(self, stage_path: str, note_id: str, **flags: Any) -> Dict[str, Any]:
         return self._request(
             "POST",
             f"/api/v1/notes/{note_id}/confirm",
             None,
-            {"stage_path": stage_path},
+            _query(stage_path, flags),
         )
 
-    def reject(self, stage_path: str, note_id: str) -> Dict[str, Any]:
+    def reject(self, stage_path: str, note_id: str, **flags: Any) -> Dict[str, Any]:
         return self._request(
             "POST",
             f"/api/v1/notes/{note_id}/reject",
             None,
-            {"stage_path": stage_path},
+            _query(stage_path, flags),
         )
+
+    def undo(self, stage_path: str, note_id: str, **flags: Any) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/api/v1/notes/{note_id}/undo",
+            None,
+            _query(stage_path, flags),
+        )
+
+    def review(self, stage_path: str, action: str, ids: list, **flags: Any) -> Dict[str, Any]:
+        body = {"stage_path": stage_path, "action": action, "ids": list(ids)}
+        body.update(_present_flags(flags))
+        return self._request("POST", "/api/v1/notes/review", body, None)
+
+    def reconcile(self, stage_path: str, prims: Dict[str, Any], **flags: Any) -> Dict[str, Any]:
+        body = {"stage_path": stage_path, "prims": prims}
+        body.update(_present_flags(flags))
+        return self._request("POST", "/api/v1/notes/reconcile", body, None)
 
     def _request(
         self,
