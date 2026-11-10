@@ -57,7 +57,7 @@ is UNVERIFIED.
 | `NVIDIA_API_KEY_FILE` | `~/.config/bufrai/nvidia-api.env` | File containing `NVIDIA_API_KEY=...` |
 | `ISAAC_RUNTIME_PROFILE` | unset | `isaacsim-6.2` selects the 6.2 lane |
 | `ISAAC_ASSIST_PROVIDER_PROBE_TIMEOUT` | `0.5` | Seconds for a `/models` probe |
-| `ISAAC_ASSIST_PROVIDER_CHAT_TIMEOUT` | `60` | Seconds for a chat completion |
+| `ISAAC_ASSIST_PROVIDER_CHAT_TIMEOUT` | `180` | Seconds for a chat completion. Cap is 300. A cold `codey-builder-64k` load on Legion took about two minutes and fell through to offline at the old 60s default. |
 
 The NVIDIA provider reads the key only from that file. It does not read
 `NVIDIA_API_KEY` from the environment. The file must be mode `0600`, must not
@@ -86,13 +86,32 @@ on the prim is not implemented.
 | `GET /api/v1/notes?stage_path=` | List notes |
 | `DELETE /api/v1/notes?stage_path=&id=` | Delete one note |
 | `POST /api/v1/notes/send` | Body `{stage_path, ids}`. One proposal per note, status `proposed`. Does not edit |
-| `POST /api/v1/notes/{id}/confirm?stage_path=` | Applies an executable proposal. Offline proposals become `confirmed` and are not applied |
+| `POST /api/v1/notes/{id}/confirm?stage_path=` | Forwards an executable proposal over Kit RPC `/exec_sync`. Status becomes `applied` only after the open stage changes. No Kit, or a Kit call that does not change the stage, leaves status `confirmed`. Offline proposals become `confirmed` and are not applied |
 | `POST /api/v1/notes/{id}/reject?stage_path=` | Status `rejected`. Does not apply |
 
 The 6.2 chat window mounts a Sticky Note toggle, selection and region
 buttons, a comment field, a note list with status, a `PIN <prim_path>` marker,
-Send, and per-note Confirm / Reject. The panel calls the service. It does not
-edit USD itself.
+Send, and per-note Confirm / Reject. The panel calls the service.
+
+Confirm does not edit USD inside the service process. The service posts a
+short script to the extension's existing Kit RPC `/exec_sync` endpoint. That
+script calls `apply_plan_on_open_stage`, which runs `pxr` on the open stage
+inside one `omni.kit.undo` group. Supported ops are `set_transform`,
+`set_attribute`, and `add_prim`. `set_transform` reads `scale`, `translate`,
+`rotate`, or a 4x4 `matrix` from the plan or its `payload`.
+
+When Kit is not connected, confirm leaves the note `confirmed` and the
+response detail says the stage was not edited.
+
+Headless proof, with Isaac's Python so `pxr` imports:
+
+```bash
+~/isaacsim/python.sh scripts/bufrai_apply_note.py --stage /path/scene.usda
+~/isaacsim/python.sh scripts/bufrai_apply_note.py --stage /path/scene.usd --note-id <id>
+```
+
+The script applies one `confirmed` executable note, saves the file, and only
+then sets the sidecar status to `applied`. A `proposed` note is refused.
 
 ## 6.0 to 6.2 API notes
 
@@ -114,8 +133,8 @@ No other 6.0-to-6.2 symbol rename was verified here.
 Run these on the Legion box. This cloud build did not run them.
 
 1. Chat turn that reads the stage (`LLM_MODE=chain`, legion-ollama up, `LOCAL_MODEL_NAME=codey-builder-64k`).
-2. One confirmed scene edit that is visible on the Isaac Sim stage.
-3. One sticky-note round trip: pick a prim, comment, send, receive a proposal, confirm, see status `applied`, and see the note still present in `<stage>.notes.json` after a service restart.
+2. One confirmed scene edit that is visible on the open stage. If the Kit RPC bridge on port 8001 is down, confirm stays `confirmed`; run `scripts/bufrai_apply_note.py` with `~/isaacsim/python.sh` and check the `.usd` or `.usda` file.
+3. One sticky-note round trip: pick a prim, comment, send, receive a proposal, confirm, see status `applied` only after the stage changes, and see the note still present in `<stage>.notes.json`. Set `ISAAC_ASSIST_PROVIDER_CHAT_TIMEOUT=180` (the default) so a cold model load does not fall through to offline.
 
 ## UNVERIFIED
 
@@ -131,6 +150,7 @@ Run these on the Legion box. This cloud build did not run them.
 - Sticky Note viewport overlay placement, drag-drawn regions, and `omni.usd` selection inside a real Kit viewport.
 - Reading a prim's real world matrix from UsdGeom. The panel stores a transform only when the prim snapshot provides one.
 - Sidecar writes next to a Nucleus URL or a read-only stage. Only absolute local paths are accepted.
-- `apply_scene_edit` does not open a stage. A confirmed plan is recorded and the note becomes `applied`. Pushing that plan into Kit RPC is not wired, so a visible stage edit is UNVERIFIED.
+- A live Isaac 6.2 GUI undo of a sticky-note edit (the apply path uses `omni.kit.undo.begin_group` / `end_group` on the Kit main thread; this cloud build cannot open a stage).
+- The headless script against a real `~/isaacsim/python.sh` and a real `.usda` file.
 - `customData` on the prim (optional, not in this frame).
 - MCP servers and the Kit tool bank (deferred by OD).

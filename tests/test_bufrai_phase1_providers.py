@@ -201,6 +201,17 @@ def test_nvidia_provider_enabled_only_with_0600_and_model(tmp_path, monkeypatch)
     assert nvidia.base_url == "https://integrate.api.nvidia.com/v1"
 
 
+def test_chat_timeout_defaults_to_180_and_caps_at_300(monkeypatch):
+    from service.isaac_assist_service.providers.chain import chat_timeout
+
+    monkeypatch.delenv("ISAAC_ASSIST_PROVIDER_CHAT_TIMEOUT", raising=False)
+    assert chat_timeout() == 180.0
+    monkeypatch.setenv("ISAAC_ASSIST_PROVIDER_CHAT_TIMEOUT", "999")
+    assert chat_timeout() == 300.0
+    monkeypatch.setenv("ISAAC_ASSIST_PROVIDER_CHAT_TIMEOUT", "90")
+    assert chat_timeout() == 90.0
+
+
 def test_llm_mode_local_stays_on_the_upstream_provider(monkeypatch):
     from service.isaac_assist_service.chat import provider_factory
     from service.isaac_assist_service.chat.llm_openai_compat import OpenAICompatProvider

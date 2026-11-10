@@ -61,7 +61,8 @@ def probe_timeout() -> float:
 
 
 def chat_timeout() -> float:
-    return _timeout("ISAAC_ASSIST_PROVIDER_CHAT_TIMEOUT", 60.0, 300.0)
+    # 180s covers a cold local-model load. The cap stays 300s.
+    return _timeout("ISAAC_ASSIST_PROVIDER_CHAT_TIMEOUT", 180.0, 300.0)
 
 
 def _with_system(messages: List[Dict]) -> List[Dict]:

@@ -4,8 +4,10 @@
 
 """Sticky Note routes under ``/api/v1/notes``.
 
-Nothing in create, list, delete, send, or reject calls ``apply_scene_edit``.
-Confirm calls it only for an executable proposal whose status is ``proposed``.
+Nothing in create, list, delete, send, or reject edits the stage.
+Confirm of an executable plan is forwarded over the existing Kit RPC bridge.
+The note becomes ``applied`` only when Kit reports that the stage changed.
+With no Kit connection the status stays ``confirmed``.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import apply as scene_apply
+from .kit_apply import apply_via_kit
 from .proposals import propose_for_note
 from .store import NoteStore, NoteStoreError
 
@@ -158,12 +160,26 @@ async def confirm_note(note_id: str, stage_path: str = Query(...)):
         note["status"] = "confirmed"
         store.update(note)
         logger.info("note confirmed without apply; id=%s", note_id)
-        return {"note": note, "applied": False}
-    scene_apply.apply_scene_edit(proposal)
-    note["status"] = "applied"
+        return {
+            "note": note,
+            "applied": False,
+            "detail": "proposal is not executable; no scene edit",
+        }
+    outcome = await apply_via_kit(proposal)
+    note["status"] = "applied" if outcome["applied"] else "confirmed"
     store.update(note)
-    logger.info("note applied; id=%s op=%s", note_id, proposal.get("op"))
-    return {"note": note, "applied": True}
+    logger.info(
+        "note confirm; id=%s status=%s kit_connected=%s",
+        note_id,
+        note["status"],
+        outcome["kit_connected"],
+    )
+    return {
+        "note": note,
+        "applied": outcome["applied"],
+        "kit_connected": outcome["kit_connected"],
+        "detail": outcome["detail"],
+    }
 
 
 @router.post("/{note_id}/reject")

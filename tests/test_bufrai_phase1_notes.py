@@ -115,7 +115,13 @@ async def test_batch_send_proposes_each_note_without_applying(client, tmp_path, 
     assert [item["status"] for item in stored] == ["proposed", "proposed"]
 
 
-async def test_confirm_applies_once_and_reject_never_applies(client, tmp_path, monkeypatch, spy):
+async def test_confirm_without_kit_stays_confirmed_and_reject_never_applies(client, tmp_path, monkeypatch, spy):
+    from service.isaac_assist_service.notes import kit_apply
+
+    async def kit_down():
+        return False
+
+    monkeypatch.setattr(kit_apply.kit_tools, "is_kit_rpc_alive", kit_down)
     monkeypatch.setattr(
         "service.isaac_assist_service.notes.proposals.complete_with_chain",
         _fake_plan,
@@ -138,17 +144,64 @@ async def test_confirm_applies_once_and_reject_never_applies(client, tmp_path, m
 
     confirmed = await client.post(f"/api/v1/notes/{second}/confirm", params={"stage_path": stage})
     assert confirmed.status_code == 200
+    body = confirmed.json()
+    assert body["applied"] is False
+    assert body["kit_connected"] is False
+    assert body["note"]["status"] == "confirmed"
+    assert "not connected" in body["detail"]
+    assert spy == []
+    assert NoteStore(stage).get(second)["status"] == "confirmed"
+    assert NoteStore(stage).get(first)["status"] == "rejected"
+
+
+async def test_confirm_marks_applied_only_after_kit_changes_stage(client, tmp_path, monkeypatch, spy):
+    from service.isaac_assist_service.notes import kit_apply
+
+    calls = []
+
+    async def kit_up():
+        return True
+
+    async def exec_sync(code, timeout=30):
+        calls.append(code)
+        return {
+            "success": True,
+            "output": 'noise\nISAAC_ASSIST_NOTE_RESULT {"ok": true, "changed": true, "op": "set_attribute", "prim_path": "/World/B", "detail": "set_attribute"}\n',
+        }
+
+    monkeypatch.setattr(kit_apply.kit_tools, "is_kit_rpc_alive", kit_up)
+    monkeypatch.setattr(kit_apply.kit_tools, "exec_sync", exec_sync)
+    monkeypatch.setattr(
+        "service.isaac_assist_service.notes.proposals.complete_with_chain",
+        _fake_plan,
+    )
+    stage = _stage(tmp_path)
+    note_id = (await client.post("/api/v1/notes", json=_note_body(stage, "/World/B", "b"))).json()["note"]["id"]
+    await client.post("/api/v1/notes/send", json={"stage_path": stage, "ids": [note_id]})
+    confirmed = await client.post(f"/api/v1/notes/{note_id}/confirm", params={"stage_path": stage})
+    assert confirmed.status_code == 200
     assert confirmed.json()["applied"] is True
     assert confirmed.json()["note"]["status"] == "applied"
-    assert len(spy) == 1
-    assert spy[0]["op"] == "set_attribute"
-    assert spy[0]["executable"] is True
+    assert "apply_plan_on_open_stage" in calls[0]
+    assert "/exec_sync" not in calls[0]
+    assert spy == []
 
-    again = await client.post(f"/api/v1/notes/{second}/confirm", params={"stage_path": stage})
-    assert again.status_code == 409
-    assert len(spy) == 1
-    assert NoteStore(stage).get(second)["status"] == "applied"
-    assert NoteStore(stage).get(first)["status"] == "rejected"
+    async def exec_unchanged(code, timeout=30):
+        return {
+            "success": True,
+            "output": 'ISAAC_ASSIST_NOTE_RESULT {"ok": false, "changed": false, "detail": "prim is not on the stage"}',
+        }
+
+    monkeypatch.setattr(kit_apply.kit_tools, "exec_sync", exec_unchanged)
+    other = (await client.post("/api/v1/notes", json=_note_body(stage, "/World/C", "c"))).json()["note"]["id"]
+    await client.post("/api/v1/notes/send", json={"stage_path": stage, "ids": [other]})
+    missed = await client.post(f"/api/v1/notes/{other}/confirm", params={"stage_path": stage})
+    assert missed.status_code == 200
+    assert missed.json()["applied"] is False
+    assert missed.json()["kit_connected"] is True
+    assert missed.json()["note"]["status"] == "confirmed"
+    assert missed.json()["detail"] == "prim is not on the stage"
+    assert spy == []
 
 
 async def test_offline_send_and_confirm_never_edit(client, tmp_path, monkeypatch, spy):
