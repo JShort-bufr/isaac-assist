@@ -323,6 +323,48 @@ async def test_nucleus_and_readonly_fail_closed_unless_session_layer(client, tmp
     assert NoteStore(str(locked), read_only=True).kind == "readonly"
 
 
+async def test_serializable_kit_failure_rejects_with_the_kit_error(client, tmp_path, monkeypatch):
+    from service.isaac_assist_service.notes import kit_apply
+
+    detail = "Type mismatch for </World/Cube.st>: expected 'GfVec2f', got 'vector<VtValue, allocator<VtValue> >'"
+    payload = {
+        "ok": False,
+        "changed": False,
+        "command_failed": True,
+        "op": "set_attribute",
+        "prim_path": "/World/Cube",
+        "detail": detail,
+        "before": {
+            "op": "set_attribute",
+            "prim_path": "/World/Cube",
+            "attributes": {"st": {"existed": True, "value": [0.25, 0.5]}},
+        },
+    }
+    encoded = json.dumps(payload)
+
+    async def kit_up():
+        return True
+
+    async def exec_sync(code, timeout=30):
+        return {"success": True, "output": "ISAAC_ASSIST_NOTE_RESULT " + encoded}
+
+    monkeypatch.setattr(kit_apply.kit_tools, "is_kit_rpc_alive", kit_up)
+    monkeypatch.setattr(kit_apply.kit_tools, "exec_sync", exec_sync)
+    monkeypatch.setattr(
+        "service.isaac_assist_service.notes.proposals.complete_with_chain",
+        _llm('{"op":"set_attribute","prim_path":"/World/Cube","payload":{"st":[0.25,0.5]}}'),
+    )
+    stage = _stage(tmp_path)
+    note_id = await _propose(client, stage, "/World/Cube", "set st")
+    refused = await client.post(f"/api/v1/notes/{note_id}/confirm", params={"stage_path": stage})
+    assert refused.status_code == 200
+    body = refused.json()
+    assert body["applied"] is False
+    assert body["note"]["status"] == "rejected"
+    assert "GfVec2f" in body["note"]["error"]
+    assert NoteStore(stage).get(note_id)["status"] == "rejected"
+
+
 async def test_kit_command_failure_rejects_the_note(client, tmp_path, monkeypatch):
     from service.isaac_assist_service.notes import kit_apply
 

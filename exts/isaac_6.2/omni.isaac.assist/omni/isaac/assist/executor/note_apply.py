@@ -17,6 +17,7 @@ A plan changes the stage only for ``set_transform``, ``set_attribute``, and
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -117,6 +118,12 @@ def _is_number(value: Any) -> bool:
 
 
 _SDF_TOKENS = (
+    ("Double2", "double2"),
+    ("Float2", "float2"),
+    ("Half2", "half2"),
+    ("Vec2d", "double2"),
+    ("Vec2f", "float2"),
+    ("Vec2h", "half2"),
     ("Double3", "double3"),
     ("Float3", "float3"),
     ("Half3", "half3"),
@@ -128,6 +135,12 @@ _SDF_TOKENS = (
     ("Normal3f", "float3"),
     ("Vector3f", "float3"),
     ("Point3f", "float3"),
+    ("Double4", "double4"),
+    ("Float4", "float4"),
+    ("Half4", "half4"),
+    ("Vec4d", "double4"),
+    ("Vec4f", "float4"),
+    ("Vec4h", "half4"),
     ("Quatd", "quatd"),
     ("Quatf", "quatf"),
     ("Matrix4d", "matrix4d"),
@@ -173,13 +186,21 @@ _TOKEN_ALIASES = {
 }
 
 _GF_FOR_TOKEN = {
+    "double2": "Vec2d",
+    "float2": "Vec2f",
+    "half2": "Vec2h",
     "double3": "Vec3d",
     "float3": "Vec3f",
     "half3": "Vec3h",
+    "double4": "Vec4d",
+    "float4": "Vec4f",
+    "half4": "Vec4h",
     "quatd": "Quatd",
     "quatf": "Quatf",
     "matrix4d": "Matrix4d",
 }
+
+_VEC_WIDTH = {token: int(token[-1]) for token in _GF_FOR_TOKEN if token[-1] in "234"}
 
 _VT_FOR_ELEMENT = {
     "double": "DoubleArray",
@@ -192,9 +213,15 @@ _VT_FOR_ELEMENT = {
 }
 
 _SDF_FOR_TOKEN = {
+    "double2": "Double2",
+    "float2": "Float2",
+    "half2": "Half2",
     "double3": "Double3",
     "float3": "Float3",
     "half3": "Half3",
+    "double4": "Double4",
+    "float4": "Float4",
+    "half4": "Half4",
     "quatd": "Quatd",
     "quatf": "Quatf",
     "matrix4d": "Matrix4d",
@@ -364,18 +391,91 @@ def _checked_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     return prepared["plan"]
 
 
-def _json_vec(value: Any) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, (list, tuple)):
-        return [float(item) for item in value]
+def _gf_kind(value: Any) -> str:
+    name = type(value).__name__
+    if name.endswith("Array"):
+        return "array"
+    if "Quat" in name:
+        return "quat"
+    if "Matrix" in name:
+        return "matrix"
+    if "Vec" in name:
+        return "vec"
+    return ""
+
+
+def _vec_to_list(value: Any) -> list:
     values = getattr(value, "values", None)
-    if values is not None:
+    if values is not None and not callable(values):
         return [float(item) for item in values]
+    if hasattr(value, "__len__"):
+        return [float(value[index]) for index in range(len(value))]
+    items = []
+    index = 0
+    while index < 16:
+        try:
+            items.append(float(value[index]))
+        except Exception:
+            break
+        index += 1
+    return items
+
+
+def _quat_to_list(value: Any) -> list:
+    """Quaternion as ``[w, x, y, z]``."""
+    real = getattr(value, "real", None)
+    imaginary = getattr(value, "imaginary", None)
+    if real is not None and imaginary is not None and not callable(imaginary):
+        imag = _vec_to_list(imaginary) if _gf_kind(imaginary) == "vec" else [float(item) for item in imaginary]
+        if len(imag) == 3:
+            return [float(real), imag[0], imag[1], imag[2]]
+    return _vec_to_list(value)
+
+
+def _matrix_to_lists(value: Any) -> list:
+    """4x4 matrix as nested row-major lists."""
     try:
-        return [float(value[0]), float(value[1]), float(value[2])]
+        first = value[0]
+        if not _is_number(first):
+            return [_vec_to_list(value[row]) for row in range(4)]
     except Exception:
-        return None
+        pass
+    flat = _vec_to_list(value)
+    if len(flat) == 16:
+        return [flat[index:index + 4] for index in range(0, 16, 4)]
+    return flat
+
+
+def to_json_value(value: Any) -> Any:
+    """Plain JSON for a Gf/Vt value. Typed pxr objects stay inside Kit."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    kind = _gf_kind(value)
+    if kind == "array":
+        return [to_json_value(item) for item in list(value)]
+    if kind == "quat":
+        return _quat_to_list(value)
+    if kind == "matrix":
+        return _matrix_to_lists(value)
+    if kind == "vec":
+        return _vec_to_list(value)
+    if isinstance(value, dict):
+        return {str(key): to_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [to_json_value(item) for item in value]
+    try:
+        json.dumps(value)
+    except TypeError:
+        return str(value)
+    return value
+
+
+def _json_safe(value: Any) -> Any:
+    return to_json_value(value)
+
+
+def _json_vec(value: Any) -> Any:
+    return to_json_value(value)
 
 
 def _read_op_value(op: Any) -> Any:
@@ -413,9 +513,9 @@ def capture_before(stage: Any, plan: Dict[str, Any]) -> Dict[str, Any]:
                 attr = prim.GetAttribute(name) if hasattr(prim, "GetAttribute") else None
                 if _is_valid(attr):
                     if hasattr(attr, "Get") and callable(attr.Get):
-                        attrs[name] = {"existed": True, "value": attr.Get()}
+                        attrs[name] = {"existed": True, "value": to_json_value(attr.Get())}
                     elif hasattr(attr, "value"):
-                        attrs[name] = {"existed": True, "value": attr.value}
+                        attrs[name] = {"existed": True, "value": to_json_value(attr.value)}
                     else:
                         attrs[name] = {"existed": True, "value": None}
                 else:
@@ -499,15 +599,19 @@ def _already_typed(value: Any, token: str) -> bool:
 
 
 def _vec3_numbers(value: Any) -> tuple:
+    return _vec_n_numbers(value, 3)
+
+
+def _vec_n_numbers(value: Any, width: int) -> tuple:
     if _is_number(value):
         number = float(value)
-        return (number, number, number)
+        return tuple(number for _ in range(width))
     values = getattr(value, "values", None)
-    if values is not None and len(tuple(values)) == 3:
+    if values is not None and len(tuple(values)) == width:
         return tuple(float(item) for item in values)
-    if isinstance(value, (list, tuple)) and len(value) == 3 and all(_is_number(item) for item in value):
-        return (float(value[0]), float(value[1]), float(value[2]))
-    raise ValueError("expected a scalar or 3 numbers")
+    if isinstance(value, (list, tuple)) and len(value) == width and all(_is_number(item) for item in value):
+        return tuple(float(item) for item in value)
+    raise ValueError(f"expected a scalar or {width} numbers")
 
 
 def _quat_numbers(value: Any) -> tuple:
@@ -542,10 +646,15 @@ def cast_usd_value(value: Any, type_name: Any) -> Any:
     token = _normalize_type_token(type_name)
     if not token or _already_typed(value, token):
         return value
-    if token in ("double3", "float3", "half3"):
-        numbers = _vec3_numbers(value)
-        factory = getattr(Gf, _GF_FOR_TOKEN[token], None) or Gf.Vec3d
-        return factory(numbers[0], numbers[1], numbers[2])
+    if token in _VEC_WIDTH:
+        numbers = _vec_n_numbers(value, _VEC_WIDTH[token])
+        class_name = _GF_FOR_TOKEN[token]
+        factory = getattr(Gf, class_name, None)
+        if factory is None and token == "double3":
+            factory = getattr(Gf, "Vec3d", None)
+        if factory is None:
+            raise ValueError(f"pxr has no Gf.{class_name}")
+        return factory(*numbers)
     if token in ("quatd", "quatf"):
         numbers = _quat_numbers(value)
         factory = getattr(Gf, _GF_FOR_TOKEN[token], None)
@@ -743,7 +852,7 @@ def _apply_via_commands(stage: Any, plan: Dict[str, Any]) -> Dict[str, Any]:
         result["rolled_back"] = _rollback_failed_group(depth_before)
     result["before"] = before
     result["undo_group"] = True
-    return result
+    return _json_safe(result)
 
 
 def apply_plan_to_stage(stage: Any, plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -769,6 +878,11 @@ def apply_plan_to_stage(stage: Any, plan: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def apply_plan_on_open_stage(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Edit the open stage and return a JSON-serializable result."""
+    return _json_safe(_apply_plan_on_open_stage(plan))
+
+
+def _apply_plan_on_open_stage(plan: Dict[str, Any]) -> Dict[str, Any]:
     """Edit the open Kit stage inside one undo group.
 
     Called on Kit's main thread via the existing ``/exec_sync`` bridge.
@@ -800,6 +914,10 @@ def apply_plan_on_open_stage(plan: Dict[str, Any]) -> Dict[str, Any]:
 
 def undo_last_on_open_stage() -> Dict[str, Any]:
     """Pop one Kit undo group. Does nothing to the stage when undo is absent."""
+    return _json_safe(_undo_last_on_open_stage())
+
+
+def _undo_last_on_open_stage() -> Dict[str, Any]:
     if omni_undo is None or not callable(getattr(omni_undo, "undo", None)):
         return {"ok": False, "reverted": False, "detail": "omni.kit.undo is not available"}
     omni_undo.undo()
@@ -849,7 +967,7 @@ def apply_note_file(stage_path: str, plan: Dict[str, Any]) -> Dict[str, Any]:
     if result.get("changed"):
         stage.Save()
         result["saved"] = True
-    return result
+    return _json_safe(result)
 
 
 def revert_note_file(stage_path: str, before: Dict[str, Any]) -> Dict[str, Any]:

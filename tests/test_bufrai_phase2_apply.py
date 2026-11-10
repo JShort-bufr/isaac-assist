@@ -405,6 +405,106 @@ def _assert_failed_command_rolls_back(note_apply):
     assert prim.attrs["xformOp:scale"].value == original
 
 
+def test_apply_result_json_dumps_gf_and_vt_values():
+    note_apply = _module()
+    try:
+        _install_gf_types(note_apply)
+        note_apply.Gf.Vec2f = type("Vec2f", (_GfValue,), {})
+        note_apply.Gf.Vec4d = type("Vec4d", (_GfValue,), {})
+        note_apply.Sdf.ValueTypeNames.Float2 = "float2"
+        note_apply.Sdf.ValueTypeNames.Double4 = "double4"
+        _assert_apply_result_is_json(note_apply)
+    finally:
+        _drop_pxr()
+
+
+def _holding(type_name, value):
+    class _Hold:
+        def IsValid(self):
+            return True
+
+        def GetTypeName(self):
+            return type_name
+
+        def Get(self):
+            return value
+
+    return _Hold()
+
+
+def _assert_apply_result_is_json(note_apply):
+    vec3 = note_apply.Gf.Vec3d(1, 1, 1)
+    vec2 = note_apply.Gf.Vec2f(0.25, 0.5)
+    quat = note_apply.Gf.Quatf(1, 0, 0, 0)
+    matrix = note_apply.Gf.Matrix4d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
+    samples = note_apply.Vt.DoubleArray([8.0, 9.0])
+    assert note_apply.cast_usd_value([0.25, 0.5], "float2") == vec2
+    assert type(note_apply.cast_usd_value([0.25, 0.5], "float2")).__name__ == "Vec2f"
+    assert note_apply.cast_usd_value([1, 2, 3, 4], "double4") == note_apply.Gf.Vec4d(1, 2, 3, 4)
+    stage = _Stage()
+    prim = _Prim("/World/Cube")
+    prim.GetAttribute = lambda name: {
+        "xformOp:scale": _holding("double3", vec3),
+        "st": _holding("float2", vec2),
+        "xformOp:orient": _holding("quatf", quat),
+        "xformOp:transform": _holding("matrix4d", matrix),
+        "samples": _holding("double[]", samples),
+    }.get(name)
+    stage.prims["/World/Cube"] = prim
+    commands = _Commands()
+    _wire(note_apply, stage, commands, _Undo())
+    identity = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+    result = note_apply.apply_plan_on_open_stage(
+        {
+            "op": "set_attribute",
+            "prim_path": "/World/Cube",
+            "executable": True,
+            "payload": {
+                "xformOp:scale": [4, 4, 4],
+                "st": [0.25, 0.5],
+                "xformOp:orient": [1, 0, 0, 0],
+                "xformOp:transform": identity,
+                "samples": [8, 9],
+            },
+        }
+    )
+    encoded = json.dumps(result)
+    parsed = json.loads(encoded)
+    attrs = parsed["before"]["attributes"]
+    assert attrs["xformOp:scale"]["value"] == [1.0, 1.0, 1.0]
+    assert attrs["st"]["value"] == [0.25, 0.5]
+    assert attrs["xformOp:orient"]["value"] == [1.0, 0.0, 0.0, 0.0]
+    assert attrs["xformOp:transform"]["value"] == identity
+    assert attrs["samples"]["value"] == [8.0, 9.0]
+    scale_value = next(kwargs["value"] for name, kwargs in commands.calls if str(kwargs.get("prop_path", "")).endswith("xformOp:scale"))
+    st_value = next(kwargs["value"] for name, kwargs in commands.calls if str(kwargs.get("prop_path", "")).endswith(".st"))
+    assert isinstance(scale_value, note_apply.Gf.Vec3d)
+    assert type(st_value).__name__ == "Vec2f"
+
+    message = "Type mismatch for </World/Cube.st>: expected 'GfVec2f', got 'vector<VtValue, allocator<VtValue> >'"
+
+    def fail_st(name, **kwargs):
+        if name == "ChangeProperty" and str(kwargs.get("prop_path", "")).endswith(".st"):
+            raise RuntimeError(message)
+        return (True, name)
+
+    commands.execute = fail_st
+    failed = note_apply.apply_plan_on_open_stage(
+        {
+            "op": "set_attribute",
+            "prim_path": "/World/Cube",
+            "executable": True,
+            "payload": {"st": [0.25, 0.5]},
+        }
+    )
+    failed_text = json.dumps(failed)
+    failed_parsed = json.loads(failed_text)
+    assert failed_parsed["command_failed"] is True
+    assert failed_parsed["changed"] is False
+    assert message in failed_parsed["detail"]
+    assert failed_parsed["before"]["attributes"]["st"]["value"] == [0.25, 0.5]
+
+
 def test_headless_revert_restores_recorded_before_values(tmp_path, monkeypatch):
     spec = importlib.util.spec_from_file_location("bufrai_apply_note_phase2", _SCRIPT_PATH)
     script = importlib.util.module_from_spec(spec)
